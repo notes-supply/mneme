@@ -115,6 +115,8 @@ struct State {
     offline: Option<String>,
     /// A push found the server had moved, so the next tick fetches.
     stale: bool,
+    /// The head when the last tick ended.
+    last_head: Option<String>,
     /// The head at which the index last had its file stats stored.
     refreshed: Option<String>,
     /// A head the server's push check refused, with its reason.
@@ -198,7 +200,10 @@ impl Autosave {
                 return Ok((Outcome::Blocked(reason), folder.head));
             }
         }
-        if folder.head.is_some() && self.state.refreshed != folder.head {
+        if folder.head.is_some()
+            && folder.head == self.state.last_head
+            && self.state.refreshed != folder.head
+        {
             let run = self.git.run(&["update-index", "-q", "--refresh"])?;
             if run.success {
                 self.state.refreshed.clone_from(&folder.head);
@@ -234,6 +239,7 @@ impl Autosave {
         {
             blocked = Some(reason.clone());
         }
+        self.state.last_head.clone_from(&head);
         let outcome = match (stopped, blocked, &self.state.offline) {
             (Some(reason), _, _) => Outcome::Stopped(reason),
             (None, Some(reason), _) => Outcome::Blocked(reason),
@@ -317,8 +323,8 @@ impl Autosave {
     /// so that it never takes the index's lock from under a writer. A checkout refuses to move a
     /// file whose entry is out of date even when its text is unchanged, and every `git status`
     /// reads again each page whose entry was written in the same second as the page. So the
-    /// service stores them before it moves the folder, and on the first tick after the head
-    /// moves, when that second has passed.
+    /// service stores them before it moves the folder, and once more when the head has stayed
+    /// put for a whole tick, so that the second in which the pages were written has passed.
     fn refresh_index(&self) -> Result<()> {
         self.git.ok(&["update-index", "-q", "--refresh"])?;
         Ok(())
