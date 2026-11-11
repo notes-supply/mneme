@@ -9,6 +9,7 @@ use std::fs::{self, File};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -38,7 +39,6 @@ fn env_number<T: std::str::FromStr>(name: &str) -> Option<T> {
 }
 
 #[test]
-#[ignore = "the autosave tick is a stub until the loop lands"]
 fn three_clones_end_equal_to_the_server_with_every_commit_once() {
     let steps = env_number("MNEME_SIM_STEPS").unwrap_or(GATE_STEPS);
     let seeds: Vec<u64> = match env_number("MNEME_SIM_SEED") {
@@ -47,6 +47,7 @@ fn three_clones_end_equal_to_the_server_with_every_commit_once() {
     };
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
+    let tally = Mutex::new(Tally::default());
     let workers = thread::available_parallelism().map_or(4, |n| n.get().min(8));
     thread::scope(|scope| {
         for _ in 0..workers {
@@ -59,6 +60,7 @@ fn three_clones_end_equal_to_the_server_with_every_commit_once() {
                     let seed = seeds[index];
                     let mut sim = Sim::new(seed);
                     let run = panic::catch_unwind(AssertUnwindSafe(|| sim.run(steps)));
+                    tally.lock().unwrap().add(&sim.tally);
                     if let Err(cause) = run {
                         failed.store(true, Ordering::Relaxed);
                         eprintln!(
@@ -71,7 +73,45 @@ fn three_clones_end_equal_to_the_server_with_every_commit_once() {
             });
         }
     });
-    eprintln!("{} seeds of {steps} steps passed", seeds.len());
+    eprintln!(
+        "{} seeds of {steps} steps passed: {:?}",
+        seeds.len(),
+        tally.into_inner().unwrap()
+    );
+}
+
+/// What the seeds exercised, so a pass can be told from a run that did nothing.
+#[derive(Debug, Default)]
+struct Tally {
+    ticks: usize,
+    saved: usize,
+    pulled: usize,
+    pushed: usize,
+    offline: usize,
+    same_line_pairs: usize,
+    hand_commits: usize,
+    hand_merges: usize,
+    commits_made: usize,
+    replays_that_overlapped: usize,
+    replays_that_merged: usize,
+    dropped_as_already_there: usize,
+}
+
+impl Tally {
+    fn add(&mut self, other: &Self) {
+        self.ticks += other.ticks;
+        self.saved += other.saved;
+        self.pulled += other.pulled;
+        self.pushed += other.pushed;
+        self.offline += other.offline;
+        self.same_line_pairs += other.same_line_pairs;
+        self.hand_commits += other.hand_commits;
+        self.hand_merges += other.hand_merges;
+        self.commits_made += other.commits_made;
+        self.replays_that_overlapped += other.replays_that_overlapped;
+        self.replays_that_merged += other.replays_that_merged;
+        self.dropped_as_already_there += other.dropped_as_already_there;
+    }
 }
 
 struct Clone {
@@ -160,22 +200,34 @@ struct Commit {
     email: String,
     time: String,
     parents: Vec<String>,
+    tree: String,
     message: String,
 }
 
 impl Commit {
     fn read(git: &Isolation, repo: &Path, id: &str) -> Self {
-        let format = "--format=%H%x00%an%x00%ae%x00%at%x00%P%x00%B";
-        let text = git.ok(repo, &["log", "-1", format, id]);
-        let fields: Vec<&str> = text.splitn(6, '\0').collect();
-        Self {
-            id: fields[0].to_owned(),
-            author: fields[1].to_owned(),
-            email: fields[2].to_owned(),
-            time: fields[3].to_owned(),
-            parents: fields[4].split_whitespace().map(str::to_owned).collect(),
-            message: fields[5].trim_end().to_owned(),
-        }
+        Self::read_all(git, repo, &["--no-walk", id]).remove(0)
+    }
+
+    /// The commits `git log` lists for `args`, with one command.
+    fn read_all(git: &Isolation, repo: &Path, args: &[&str]) -> Vec<Self> {
+        let format = "--format=%H%x01%an%x01%ae%x01%at%x01%P%x01%T%x01%B";
+        let text = git.ok(repo, &[&["log", "-z", format], args].concat());
+        text.split('\0')
+            .filter(|record| !record.is_empty())
+            .map(|record| {
+                let fields: Vec<&str> = record.splitn(7, '\x01').collect();
+                Self {
+                    id: fields[0].to_owned(),
+                    author: fields[1].to_owned(),
+                    email: fields[2].to_owned(),
+                    time: fields[3].to_owned(),
+                    parents: fields[4].split_whitespace().map(str::to_owned).collect(),
+                    tree: fields[5].to_owned(),
+                    message: fields[6].trim_end().to_owned(),
+                }
+            })
+            .collect()
     }
 
     fn subject(&self) -> &str {
@@ -213,6 +265,7 @@ struct Sim {
     trace: Vec<String>,
     /// The server's head once the starting pages are in.
     base: String,
+    tally: Tally,
 }
 
 impl Sim {
@@ -232,6 +285,7 @@ impl Sim {
             outcomes: Vec::new(),
             trace: Vec::new(),
             base: String::new(),
+            tally: Tally::default(),
         };
         sim.start_pages();
         for (machine, token) in MACHINES {
@@ -308,6 +362,11 @@ impl Sim {
         }
         self.converge();
         self.check();
+        let (overlapped, merged, dropped) = self.check_every_commit_once();
+        self.tally.commits_made += self.made.len();
+        self.tally.replays_that_overlapped += overlapped;
+        self.tally.replays_that_merged += merged;
+        self.tally.dropped_as_already_there += dropped;
     }
 
     fn token(&mut self, clone: usize) -> String {
@@ -334,8 +393,9 @@ impl Sim {
             67..71 => self.delete(clone),
             71..75 => self.rename(clone, false),
             75..79 => self.rename(clone, true),
-            79..85 => self.same_line_edits(clone),
-            85..90 => self.hand_commit(clone),
+            79..84 => self.same_line_edits(clone),
+            84..86 => self.delete_on_two(clone),
+            86..90 => self.hand_commit(clone),
             90..94 => self.hand_pull(clone),
             _ => self.toggle_network(clone),
         }
@@ -355,6 +415,14 @@ impl Sim {
         let now = self.now;
         let outcome = self.clones[clone].service.tick(now);
         self.note(clone, &format!("tick: {outcome:?}"));
+        self.tally.ticks += 1;
+        match outcome {
+            Outcome::Saved => self.tally.saved += 1,
+            Outcome::Pulled => self.tally.pulled += 1,
+            Outcome::Pushed => self.tally.pushed += 1,
+            Outcome::Offline(_) => self.tally.offline += 1,
+            _ => {}
+        }
         self.outcomes.push((clone, outcome.clone()));
         self.read_reflog(clone);
         outcome
@@ -480,32 +548,19 @@ impl Sim {
     /// both save before either syncs. Whichever integrates second overlaps, keeps its own
     /// text and says so.
     fn same_line_edits(&mut self, first: usize) {
-        let second = (first + 1 + self.rng.usize(..self.clones.len() - 1)) % self.clones.len();
+        let second = self.other(first);
         if !self.clones[first].online || !self.clones[second].online {
             return;
         }
-        let server_head = self.server_head();
-        let candidates: Vec<String> = self.clones[first]
-            .pages()
-            .into_iter()
-            .filter(|path| {
-                let text = fs::read(self.clones[first].path().join(path)).unwrap();
-                fs::read(self.clones[second].path().join(path))
-                    .ok()
-                    .as_ref()
-                    == Some(&text)
-                    && self.server_text(&server_head, path).as_deref() == Some(&text[..])
-            })
-            .collect();
-        if candidates.is_empty() {
+        let Some(path) = self.shared_page(first, second, true) else {
             return;
-        }
-        let path = candidates[self.rng.usize(..candidates.len())].clone();
+        };
         let lines = self.read(first, &path).lines().count();
         let line = self.rng.usize(..lines.max(1));
         self.replace_line(first, &path, Some(line));
         let saved = self.replace_line(second, &path, Some(line));
         self.advance(QUIET + Duration::from_secs(1));
+        self.tally.same_line_pairs += 1;
         self.tick_now(first);
         let outcome = self.tick_now(second);
         let seed = self.seed;
@@ -529,6 +584,54 @@ impl Sim {
         );
     }
 
+    /// Two clones delete the same page before either syncs, so the second deletion finds the
+    /// page already gone.
+    fn delete_on_two(&mut self, first: usize) {
+        let second = self.other(first);
+        let roomy = |sim: &Self, clone: usize| {
+            let target = &sim.clones[clone];
+            let deleted = target
+                .status()
+                .lines()
+                .filter(|line| line[..2].contains('D') && is_page(line))
+                .count();
+            deleted < 4 && target.pages().len() >= 6
+        };
+        if !roomy(self, first) || !roomy(self, second) {
+            return;
+        }
+        let Some(path) = self.shared_page(first, second, false) else {
+            return;
+        };
+        for clone in [first, second] {
+            fs::remove_file(self.clones[clone].path().join(&path)).unwrap();
+            self.note(clone, &format!("delete {path}, on another clone too"));
+        }
+    }
+
+    fn other(&mut self, clone: usize) -> usize {
+        (clone + 1 + self.rng.usize(..self.clones.len() - 1)) % self.clones.len()
+    }
+
+    /// A page with the same text on both clones, and on the server's main when `on_server`.
+    fn shared_page(&mut self, first: usize, second: usize, on_server: bool) -> Option<String> {
+        let server_head = self.server_head();
+        let candidates: Vec<String> = self.clones[first]
+            .pages()
+            .into_iter()
+            .filter(|path| {
+                let text = fs::read(self.clones[first].path().join(path)).unwrap();
+                fs::read(self.clones[second].path().join(path))
+                    .ok()
+                    .as_ref()
+                    == Some(&text)
+                    && (!on_server
+                        || self.server_text(&server_head, path).as_deref() == Some(&text[..]))
+            })
+            .collect();
+        (!candidates.is_empty()).then(|| candidates[self.rng.usize(..candidates.len())].clone())
+    }
+
     fn hand_commit(&mut self, clone: usize) {
         if self.clones[clone].status().is_empty() {
             return;
@@ -541,15 +644,17 @@ impl Sim {
         let output = target.git_at(now, &["commit", "-q", "-m", &message]);
         assert!(output.status.success(), "{output:?}");
         self.note(clone, &format!("hand commit {token}"));
+        self.tally.hand_commits += 1;
         self.read_reflog(clone);
     }
 
-    /// `git pull` with a merge, as an agent might run it. A pull that stops on a conflict is
-    /// undone, as the agent would before walking away.
+    /// `git pull` with a merge, as an agent might run it after committing its work. A pull
+    /// that stops on a conflict is undone, as the agent would before walking away.
     fn hand_pull(&mut self, clone: usize) {
         if !self.clones[clone].online {
             return;
         }
+        self.hand_commit(clone);
         let now = self.now;
         let target = &self.clones[clone];
         let header = target.header();
@@ -567,6 +672,10 @@ impl Sim {
             ],
         );
         let merging = target.path().join(".git/MERGE_HEAD").exists();
+        let merged = Commit::read(&target.git, target.path(), "HEAD")
+            .parents
+            .len()
+            > 1;
         if merging {
             target.ok(&["merge", "--abort"]);
         }
@@ -580,6 +689,7 @@ impl Sim {
             if merging { ", conflict undone" } else { "" }
         );
         self.note(clone, &what);
+        self.tally.hand_merges += usize::from(merged && !merging);
         self.read_reflog(clone);
     }
 
@@ -666,34 +776,55 @@ impl Sim {
             stuck.is_empty(),
             "seed {seed}: no tick was blocked or stopped: {stuck:?}"
         );
-        self.check_every_commit_once();
     }
 
-    fn check_every_commit_once(&self) {
+    /// Returns how many replays overlapped, how many merged cleanly, and how many commits were
+    /// left out because their change was already there.
+    fn check_every_commit_once(&self) -> (usize, usize, usize) {
         let seed = self.seed;
         let repo = self.server.repo();
         let range = format!("{}..main", self.base);
-        let on_server: Vec<Commit> = self
+        let on_server = Commit::read_all(&self.git, repo, &["--reverse", &range]);
+        let base_tree = self
             .git
-            .ok(repo, &["rev-list", "--reverse", &range])
-            .lines()
-            .map(|id| Commit::read(&self.git, repo, id))
-            .collect();
+            .ok(repo, &["rev-parse", &format!("{}^{{tree}}", self.base)]);
+        let mut trees: HashMap<&str, &str> = HashMap::new();
+        trees.insert(&self.base, base_tree.trim());
+        for commit in &on_server {
+            trees.insert(&commit.id, &commit.tree);
+        }
+        for commit in &on_server {
+            let parent = trees.get(commit.parents[0].as_str()).copied();
+            assert_ne!(
+                parent.unwrap_or_default(),
+                commit.tree,
+                "seed {seed}: {} on main is not empty",
+                commit.id
+            );
+        }
         let mut by_key: HashMap<_, Vec<&Commit>> = HashMap::new();
         for commit in &on_server {
             by_key.entry(commit.key()).or_default().push(commit);
         }
-        let made: Vec<(usize, Commit)> = self
-            .made
-            .iter()
-            .map(|(clone, id)| {
-                (
-                    *clone,
-                    Commit::read(&self.clones[*clone].git, self.clones[*clone].path(), id),
-                )
-            })
-            .filter(|(_, commit)| commit.parents.len() <= 1)
-            .collect();
+        let mut made: Vec<(usize, Commit)> = Vec::new();
+        for (index, clone) in self.clones.iter().enumerate() {
+            let ids: Vec<&str> = self
+                .made
+                .iter()
+                .filter(|(by, _)| *by == index)
+                .map(|(_, id)| id.as_str())
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let args = [&["--no-walk=unsorted"][..], &ids].concat();
+            made.extend(
+                Commit::read_all(&clone.git, clone.path(), &args)
+                    .into_iter()
+                    .filter(|commit| commit.parents.len() <= 1)
+                    .map(|commit| (index, commit)),
+            );
+        }
         let mut made_by_key: BTreeMap<_, (usize, &Commit)> = BTreeMap::new();
         for (clone, commit) in &made {
             let earlier = made_by_key.insert(commit.key(), (*clone, commit));
@@ -710,22 +841,27 @@ impl Sim {
                 "seed {seed}: {key:?} on main was made by a clone"
             );
         }
+        let (mut overlapped, mut merged, mut dropped) = (0, 0, 0);
         for (clone, commit) in &made {
-            match by_key.get(&commit.key()) {
-                Some(found) => {
-                    let found = found[0];
-                    assert_eq!(found.email, commit.email, "seed {seed}: the author is kept");
-                    assert!(
-                        found.message.starts_with(&commit.message),
-                        "seed {seed}: the message of {} is kept in {}",
-                        commit.id,
-                        found.id
-                    );
-                    self.check_overlap(*clone, commit, found);
-                }
-                None => self.check_already_there(*clone, commit),
+            let Some(found) = by_key.get(&commit.key()).map(|found| found[0]) else {
+                self.check_already_there(*clone, commit);
+                dropped += 1;
+                continue;
+            };
+            assert_eq!(found.email, commit.email, "seed {seed}: the author is kept");
+            assert!(
+                found.message.starts_with(&commit.message),
+                "seed {seed}: the message of {} is kept in {}",
+                commit.id,
+                found.id
+            );
+            if self.check_overlap(*clone, commit, found) {
+                overlapped += 1;
+            } else if found.id != commit.id {
+                merged += 1;
             }
         }
+        (overlapped, merged, dropped)
     }
 
     /// A made commit missing from main is fine only when all it did was delete pages that
@@ -776,8 +912,8 @@ impl Sim {
 
     /// Replays the clone's commit onto the commit below it on main with Git's own merge. When
     /// that overlaps, main's commit says so and has the clone's text of every overlapping path.
-    /// When it does not, main's commit is exactly that merge.
-    fn check_overlap(&self, clone: usize, made: &Commit, found: &Commit) {
+    /// When it does not, main's commit is exactly that merge. Returns whether it overlapped.
+    fn check_overlap(&self, clone: usize, made: &Commit, found: &Commit) -> bool {
         let seed = self.seed;
         let target = &self.clones[clone];
         let base = made.parents.first().map_or(EMPTY_TREE, String::as_str);
@@ -797,7 +933,7 @@ impl Sim {
         let text = String::from_utf8(output.stdout).unwrap();
         let mut records = text.split('\0');
         let merged = records.next().unwrap().to_owned();
-        let tree = target.ok(&["rev-parse", &format!("{}^{{tree}}", found.id)]);
+        let tree = &found.tree;
         match output.status.code() {
             Some(0) => {
                 assert_eq!(
@@ -806,12 +942,8 @@ impl Sim {
                     "seed {seed}: {} did not overlap and has no Overlap trailer",
                     found.id
                 );
-                assert_eq!(
-                    tree.trim(),
-                    merged,
-                    "seed {seed}: {} is Git's merge",
-                    found.id
-                );
+                assert_eq!(tree, &merged, "seed {seed}: {} is Git's merge", found.id);
+                false
             }
             Some(1) => {
                 assert_eq!(
@@ -851,6 +983,7 @@ impl Sim {
                         target.machine
                     );
                 }
+                true
             }
             code => panic!("seed {seed}: merge-tree failed with {code:?}: {text}"),
         }

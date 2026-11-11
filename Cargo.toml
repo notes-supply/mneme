@@ -19,6 +19,7 @@ subtle = "2.6.1"
 similar = { version = "3.2.1", features = ["inline"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["io-util", "net", "process", "rt-multi-thread", "signal", "sync"] }
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -41,7 +42,6 @@ dbg_macro = "deny"
 fastrand = "2.5.0"
 flate2 = "1.1.11"
 tempfile = "3.27.0"
-ureq = { version = "3.5.1", default-features = false }
 
 [profile.release]
 lto = "thin"
