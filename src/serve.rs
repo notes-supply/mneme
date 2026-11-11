@@ -18,6 +18,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use crate::api::{self, ApiError};
 use crate::auth::Tokens;
 use crate::git_http::{self, Machine};
+use crate::git_version;
 use crate::index::Index;
 use crate::log;
 use crate::machines::Machines;
@@ -97,8 +98,9 @@ impl Wiki {
 ///
 /// # Errors
 ///
-/// Fails when the repository cannot be read or the address cannot be bound.
+/// Fails when `git` is too old, the repository cannot be read or the address cannot be bound.
 pub async fn run(args: Args) -> Result<()> {
+    git_version::check(Path::new("git"), "mneme serve")?;
     let mut terminate = signal(SignalKind::terminate()).context("watching for SIGTERM")?;
     let tokens = Tokens::load(&args.tokens)?;
     let machines = Machines::new(tokens.names());

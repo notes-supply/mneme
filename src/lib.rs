@@ -11,6 +11,7 @@ pub mod api;
 pub mod auth;
 pub mod autosave;
 pub mod git_http;
+pub mod git_version;
 pub mod hook;
 pub mod index;
 pub mod log;

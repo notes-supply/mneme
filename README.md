@@ -13,7 +13,7 @@ git -c "http.extraHeader=Authorization: Bearer $TOKEN" clone http://host:8080/gi
 curl http://host:8080/v1/pages
 ```
 
-The tokens file maps each machine's name to the SHA-256 of its token. The server creates the repository when it is missing, and installs the push check (`mneme hook pre-receive`) into it. It needs `git` on `PATH`. Logs are JSON lines on standard error. SIGTERM stops it.
+The tokens file maps each machine's name to the SHA-256 of its token. The server creates the repository when it is missing, and installs the push check (`mneme hook pre-receive`) into it. It needs Git 2.45 or newer on `PATH`, with `git http-backend`, and refuses to start with an older one. Logs are JSON lines on standard error. SIGTERM stops it.
 
 The reading API is described in [docs/api.md](docs/api.md).
 

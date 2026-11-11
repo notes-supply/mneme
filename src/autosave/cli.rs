@@ -3,7 +3,6 @@
 use std::fs::{self, File, TryLockError};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::Command as Process;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
@@ -12,12 +11,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use super::git::Git;
 use super::{Autosave, Config, Outcome, Token};
-use crate::log;
-
-/// The oldest Git the service works with. `git merge-tree --write-tree` came in 2.38 and its
-/// `--merge-base` in 2.40, and since 2.45 its inputs may be trees, which the replay needs for a
-/// commit with no parent and for a server with no `main` yet.
-const OLDEST_GIT: (u32, u32, u32) = (2, 45, 0);
+use crate::{git_version, log};
 
 /// Which folder, which server, and who this machine is.
 #[derive(Debug, clap::Args)]
@@ -114,41 +108,6 @@ impl Target {
     }
 }
 
-/// Refuses a Git older than [`OLDEST_GIT`], before anything is changed.
-fn check_git(program: &Path) -> Result<()> {
-    let output = Process::new(program)
-        .arg("--version")
-        .output()
-        .with_context(|| format!("running {} --version", program.display()))?;
-    let said = String::from_utf8_lossy(&output.stdout);
-    let said = said.trim();
-    let Some(version) = git_version(said) else {
-        bail!("cannot read the Git version from {said:?}");
-    };
-    if version < OLDEST_GIT {
-        let (major, minor, patch) = OLDEST_GIT;
-        bail!("{said} is too old: mneme autosave needs Git {major}.{minor}.{patch} or newer");
-    }
-    Ok(())
-}
-
-/// The version in `git version 2.45.2`, `git version 2.39.3 (Apple Git-145)` or
-/// `git version 2.45.2.windows.1`.
-fn git_version(said: &str) -> Option<(u32, u32, u32)> {
-    let number = said
-        .strip_prefix("git version ")?
-        .split_whitespace()
-        .next()?;
-    let mut parts = number.split('.').map(|part| {
-        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
-        digits.parse().ok()
-    });
-    let major = parts.next()??;
-    let minor = parts.next()??;
-    let patch = parts.next().flatten().unwrap_or(0);
-    Some((major, minor, patch))
-}
-
 /// Takes the folder for this service alone, until the returned file is closed when the service
 /// exits. Two services on one folder would each commit and move it under the other.
 fn hold(folder: &Path) -> Result<File> {
@@ -180,7 +139,7 @@ fn hold(folder: &Path) -> Result<File> {
 /// Ticks until SIGTERM or Ctrl-C, and logs each change of outcome.
 fn serve(run: &Run) -> Result<()> {
     let config = run.target.config(Some(run))?;
-    check_git(&config.git)?;
+    git_version::check(&config.git, "mneme autosave")?;
     let _held = hold(&config.folder)?;
     let pause = run.tick_seconds;
     log::emit(
@@ -220,7 +179,7 @@ fn serve(run: &Run) -> Result<()> {
 
 fn init(target: &Target) -> Result<()> {
     let config = target.config(None)?;
-    check_git(&config.git)?;
+    git_version::check(&config.git, "mneme autosave")?;
     let git = Git::new(&config);
     let url = git.url();
     let path = &config.folder;
@@ -265,24 +224,4 @@ fn init(target: &Target) -> Result<()> {
     }
     log::emit("initialized", json!({ "folder": path, "cloned": false }));
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_git_version_is_read_from_each_way_git_prints_it() {
-        for (said, version) in [
-            ("git version 2.56.0", Some((2, 56, 0))),
-            ("git version 2.39.3 (Apple Git-145)", Some((2, 39, 3))),
-            ("git version 2.45.2.windows.1", Some((2, 45, 2))),
-            ("git version 2.45.0-rc0", Some((2, 45, 0))),
-            ("git version 3.0", Some((3, 0, 0))),
-            ("hub version 2.14", None),
-            ("git version unknown", None),
-        ] {
-            assert_eq!(git_version(said), version, "{said}");
-        }
-    }
 }

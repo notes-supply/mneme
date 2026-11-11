@@ -47,9 +47,9 @@ fn real_git() -> PathBuf {
         .unwrap()
 }
 
-/// `mneme autosave <command>` with a `git` first on `PATH` that says it is `version` and passes
-/// every other command to the real one.
-fn autosave_with_git(dir: &Path, version: &str, command: &str) -> Output {
+/// `mneme` with a `git` first on `PATH` that says it is `version` and passes every other command
+/// to the real one.
+fn mneme_with_git(dir: &Path, version: &str) -> Command {
     let fake = dir.join("bin");
     fs::create_dir_all(&fake).unwrap();
     let script = format!(
@@ -58,22 +58,64 @@ fn autosave_with_git(dir: &Path, version: &str, command: &str) -> Output {
     );
     fs::write(fake.join("git"), script).unwrap();
     fs::set_permissions(fake.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
-    fs::write(dir.join("token"), "a-token\n").unwrap();
     let path = std::env::join_paths(
         [fake]
             .into_iter()
             .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
-    Command::new(env!("CARGO_BIN_EXE_mneme"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mneme"));
+    command.env("PATH", path);
+    command
+}
+
+/// `mneme autosave <command>` with a `git` that says it is `version`.
+fn autosave_with_git(dir: &Path, version: &str, command: &str) -> Output {
+    fs::write(dir.join("token"), "a-token\n").unwrap();
+    mneme_with_git(dir, version)
         .args(["autosave", command, "--folder"])
         .arg(dir.join("wiki"))
         .args(["--server", "http://127.0.0.1:9", "--token-file"])
         .arg(dir.join("token"))
         .args(["--name", "x"])
-        .env("PATH", path)
         .output()
         .unwrap()
+}
+
+/// `mneme serve` with a `git` that says it is `version`, and a tokens file that does not
+/// exist, so that a server that passes the check stops at the tokens instead of serving.
+fn serve_with_git(dir: &Path, version: &str) -> Output {
+    mneme_with_git(dir, version)
+        .args(["serve", "--addr", "127.0.0.1:0", "--repo"])
+        .arg(dir.join("wiki.git"))
+        .arg("--tokens")
+        .arg(dir.join("no-tokens.json"))
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn serve_refuses_to_start_with_a_git_older_than_2_45() {
+    for version in ["git version 2.44.2", "git version 2.36.0"] {
+        let dir = TempDir::new().unwrap();
+        let output = serve_with_git(dir.path(), version);
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{version}: {said}");
+        let found = version.split(' ').nth(2).unwrap();
+        assert!(said.contains(found), "{version}: {said}");
+        assert!(
+            said.contains("mneme serve needs Git 2.45.0 or newer"),
+            "{version}: {said}"
+        );
+        assert!(!said.contains("tokens"), "{version}: checked first: {said}");
+    }
+    for version in ["git version 2.45.0", "git version 2.56.0"] {
+        let dir = TempDir::new().unwrap();
+        let output = serve_with_git(dir.path(), version);
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(!said.contains("or newer"), "{version}: {said}");
+        assert!(said.contains("no-tokens.json"), "{version}: {said}");
+    }
 }
 
 #[test]
