@@ -149,7 +149,7 @@ fn serve(run: &Run) -> Result<()> {
 fn init(target: &Target) -> Result<()> {
     let config = target.config(None)?;
     let git = Git::new(&config);
-    let url = format!("{}/git/wiki.git", config.server);
+    let url = git.url();
     let path = &config.folder;
     let empty = match fs::read_dir(path) {
         Ok(mut entries) => entries.next().is_none(),
@@ -158,7 +158,7 @@ fn init(target: &Target) -> Result<()> {
     };
     if empty {
         fs::create_dir_all(path)?;
-        let run = git.clone_from(&url)?;
+        let run = git.clone_server()?;
         if !run.success {
             bail!("cloning {url} failed: {}", run.error());
         }
@@ -177,7 +177,7 @@ fn init(target: &Target) -> Result<()> {
     }
     let origin = git.run(&["config", "--get", "remote.origin.url"])?;
     if !origin.success {
-        git.ok(&["remote", "add", "origin", &url])?;
+        git.ok(&["remote", "add", "origin", url])?;
     } else if String::from_utf8_lossy(&origin.stdout).trim() != url {
         bail!(
             "the folder's origin is {}, not {url}",

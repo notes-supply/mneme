@@ -16,7 +16,7 @@ use anyhow::{Result, bail};
 use serde_json::json;
 
 use crate::log;
-use crate::machines::Report;
+use crate::machines::{REPORT_HEADER, Report};
 pub use cli::{Command, main};
 use folder::Folder;
 use git::Git;
@@ -73,7 +73,7 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// The state as `POST /git/status` takes it.
+    /// The state as a report names it.
     #[must_use]
     pub fn state(&self) -> &'static str {
         match self {
@@ -153,7 +153,6 @@ enum Push {
 pub struct Autosave {
     config: Config,
     git: Git,
-    http: ureq::Agent,
     state: State,
 }
 
@@ -161,14 +160,9 @@ impl Autosave {
     /// A service that has not ticked yet.
     #[must_use]
     pub fn new(config: Config) -> Self {
-        let http = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(10)))
-            .build()
-            .into();
         Self {
             git: Git::new(&config),
             config,
-            http,
             state: State::default(),
         }
     }
@@ -602,7 +596,9 @@ impl Autosave {
     }
 
     /// Tells the server the state when it changed, and at least once per interval. A report
-    /// that does not arrive is sent again on the next tick.
+    /// that does not arrive is sent again on the next tick. It goes as a header on a Git
+    /// request, so it reaches the server exactly as syncing does, through the same proxy and
+    /// certificates.
     fn report(&mut self, now: SystemTime, outcome: &Outcome, head: Option<String>) {
         let mut detail = outcome.detail().to_owned();
         if detail.len() > MAX_DETAIL {
@@ -621,18 +617,13 @@ impl Autosave {
             None => true,
             Some((last, at)) => *last != report || *at + self.config.report_every <= now,
         };
-        if due && self.send(&report).is_ok() {
+        if due
+            && self
+                .git
+                .ask_server_with(&format!("{REPORT_HEADER}: {}", report.encode()))
+                .is_ok_and(|run| run.success)
+        {
             self.state.reported = Some((report, now));
         }
-    }
-
-    fn send(&self, report: &Report) -> Result<()> {
-        let body = serde_json::to_vec(report)?;
-        self.http
-            .post(format!("{}/git/status", self.config.server))
-            .header("authorization", format!("Bearer {}", self.config.token.0))
-            .header("content-type", "application/json")
-            .send(&body[..])?;
-        Ok(())
     }
 }

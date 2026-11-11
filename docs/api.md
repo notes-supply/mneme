@@ -1,6 +1,6 @@
 # Reading API
 
-Every route is `GET`, lives under `/v1`, and answers with JSON. There is no authentication at this layer; the network keeps it private. The one route that writes, `POST /git/status`, sits beside the Git routes and needs a machine's token. It is described [at the end](#post-gitstatus).
+Every route is `GET`, lives under `/v1`, and answers with JSON. There is no authentication at this layer; the network keeps it private. The machines' reports, which `/v1/machines` lists, arrive on the Git routes with a machine's token, as described [at the end](#reports).
 
 Each route has one example response in `tests/fixtures/api/`. The tests check every real response against the shape of its example, both ways, so the frontend can test against the same files. To write them again from a real server, run `MNEME_WRITE_EXAMPLES=1 cargo nextest run every_route`.
 
@@ -101,13 +101,15 @@ Example: [`search.json`](../tests/fixtures/api/search.json).
 
 Every machine in the tokens file, by name, as `{ "total", "machines": [Machine] }`. The server keeps this in memory, so it is empty again after a restart.
 
-A `Machine` has `name`, `seen` (when it last made a Git request with its token), `reported` (when its last report arrived), the `state`, `detail` and `head` of that report, and `current`, which is `true` when the reported head is the server's head. Every field but `name` and `current` is `null` until the machine has done that.
+A `Machine` has `name`, `seen` (when it last made a Git request with its token that carried no report, so its last fetch or push), `reported` (when its last report arrived), the `state`, `detail` and `head` of that report, and `current`, which is `true` when the reported head is the server's head. Every field but `name` and `current` is `null` until the machine has done that.
 
 Example: [`machines.json`](../tests/fixtures/api/machines.json).
 
-## `POST /git/status`
+## Reports
 
-An autosave service reports its state, with `Authorization: Bearer <token>` and a JSON body `{ "state", "detail", "head" }`. `state` is a short word such as `idle` or `blocked`, `detail` says why or is empty, and `head` is the clone's `main` as a full commit id, or `null`. The answer is `204` with no body. A request without the right token is `401` with no body, a body that is not JSON is `400`, a body with missing or unknown fields or bad values is `422`, and a body over 4 KiB is `413`, each with `{ "error" }`. A report is not a Git request, so it leaves `seen` as it was.
+An autosave service reports its state in a `Mneme-Report` header on a Git request, which it makes with `git ls-remote` and its token. Git sends it, so the report takes the same path and trusts the same certificates as syncing. The header's value is the report's JSON in base64, `{ "state", "detail", "head" }`. `state` is a short word such as `idle` or `blocked`, `detail` says why or is empty, and `head` is the clone's `main` as a full commit id, or `null`.
+
+The server stores the report and answers the Git request as usual. A request that carries a report does not change `seen`. A header over 4 KiB is `413`, one that is not base64 or not JSON is `400`, and a report with missing or unknown fields or bad values is `422`, each with `{ "error" }` and without running the Git request. A request without the right token is `401` with no body, whatever it carries.
 
 The autosave service sends these states. The detail is empty unless the list says otherwise.
 
@@ -121,4 +123,4 @@ The autosave service sends these states. The detail is empty unless the list say
 | `blocked` | it waits on the folder and changes nothing; `detail` says why |
 | `stopped` | it refused a save that would delete most pages; `detail` says how many |
 
-Example request body: [`report.json`](../tests/fixtures/api/report.json).
+Example report, before encoding: [`report.json`](../tests/fixtures/api/report.json).

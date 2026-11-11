@@ -37,8 +37,15 @@ pub(super) struct Git {
     folder: PathBuf,
     /// The repository inside the folder, `.git`.
     repository: PathBuf,
-    /// Variables every command gets. The token is among them, never on a command line.
+    /// The server's base URL, which every setting for it is scoped to.
+    server: String,
+    /// The server's Git repository.
+    url: String,
+    /// Variables every command gets.
     env: Vec<(OsString, OsString)>,
+    /// Configuration every command gets through `GIT_CONFIG_*`. The token is among it, never
+    /// on a command line.
+    settings: Vec<(String, String)>,
     /// The tick's time, as Git reads a date.
     date: String,
 }
@@ -76,20 +83,23 @@ impl Git {
                 ("LC_ALL", "C".to_owned()),
                 ("GIT_COMMITTER_NAME", config.machine.clone()),
                 ("GIT_COMMITTER_EMAIL", email(&config.machine)),
-                ("GIT_CONFIG_COUNT", settings.len().to_string()),
             ]
             .map(|(key, value)| (key.into(), value.into())),
         );
-        for (n, (key, value)) in settings.into_iter().enumerate() {
-            env.push((format!("GIT_CONFIG_KEY_{n}").into(), key.into()));
-            env.push((format!("GIT_CONFIG_VALUE_{n}").into(), value.into()));
-        }
         Self {
             folder,
             repository,
+            server: config.server.clone(),
+            url: format!("{}/git/wiki.git", config.server),
             env,
+            settings: settings.into(),
             date: String::new(),
         }
+    }
+
+    /// The server's Git repository, as `origin` should name it.
+    pub fn url(&self) -> &str {
+        &self.url
     }
 
     pub fn git_dir(&self) -> &Path {
@@ -108,37 +118,63 @@ impl Git {
         &self.date
     }
 
-    /// `git` with every variable set, and none of the caller's own `GIT_` variables.
-    fn command(&self) -> Command {
+    /// `git` with every variable and setting, `extra` settings after them, and none of the
+    /// caller's own `GIT_` variables.
+    fn command(&self, extra: &[(String, String)]) -> Command {
         let mut command = Command::new("git");
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("GIT_") {
                 command.env_remove(key);
             }
         }
+        let settings: Vec<_> = self.settings.iter().chain(extra).collect();
         command
             .envs(self.env.iter().map(|(key, value)| (key, value)))
             .env("GIT_COMMITTER_DATE", &self.date)
+            .env("GIT_CONFIG_COUNT", settings.len().to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for (n, (key, value)) in settings.into_iter().enumerate() {
+            command.env(format!("GIT_CONFIG_KEY_{n}"), key);
+            command.env(format!("GIT_CONFIG_VALUE_{n}"), value);
+        }
         command
     }
 
-    /// Clones `url` into the folder, which must be missing or empty.
-    pub fn clone_from(&self, url: &str) -> Result<Run> {
-        let mut command = self.command();
+    /// Clones the server's repository into the folder, which must be missing or empty.
+    pub fn clone_server(&self) -> Result<Run> {
+        let mut command = self.command(&[]);
         command
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
-            .args(["clone", "--quiet", url])
+            .args(["clone", "--quiet", &self.url])
             .arg(&self.folder);
         finish(command, &["clone"], &[])
     }
 
+    /// Asks the server for its `main` with `header` on every request. It needs no repository,
+    /// so it works when the folder is not one.
+    pub fn ask_server_with(&self, header: &str) -> Result<Run> {
+        let extra = [
+            (
+                format!("http.{}.extraHeader", self.server),
+                header.to_owned(),
+            ),
+            ("protocol.version".to_owned(), "0".to_owned()),
+        ];
+        let mut command = self.command(&extra);
+        command
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .current_dir("/")
+            .args(["ls-remote", &self.url, "refs/heads/main"]);
+        finish(command, &["ls-remote"], &[])
+    }
+
     /// Runs `git` with `args`, `extra` variables and `input` on standard input.
     pub fn run_with(&self, args: &[&str], extra: &[(&str, &str)], input: &[u8]) -> Result<Run> {
-        let mut command = self.command();
+        let mut command = self.command(&[]);
         command
             .current_dir(&self.folder)
             .args(args)

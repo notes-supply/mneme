@@ -1,5 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 
 use crate::git::{Isolation, Work};
@@ -18,10 +20,16 @@ fn bearer(machine: &str) -> String {
     format!("Bearer {token}")
 }
 
-fn report(server: &Server, authorization: Option<&str>, body: &str) -> Reply {
-    let mut headers = vec![("content-type", "application/json")];
+/// A Git request that carries `value` as its report.
+fn report_raw(server: &Server, authorization: Option<&str>, value: &str) -> Reply {
+    let mut headers = vec![("mneme-report", value)];
     headers.extend(authorization.map(|value| ("authorization", value)));
-    server.post("/git/status", &headers, body.as_bytes())
+    server.get_with("/git/wiki.git/info/refs?service=git-upload-pack", &headers)
+}
+
+/// A Git request that carries `json` as its report, encoded as the service encodes it.
+fn report(server: &Server, authorization: Option<&str>, json: &str) -> Reply {
+    report_raw(server, authorization, &STANDARD.encode(json))
 }
 
 fn machine(server: &Server, name: &str) -> Value {
@@ -78,7 +86,11 @@ fn every_machine_is_listed_with_its_last_git_request_and_report() {
     let head = server_head(&server);
     let body = json!({ "state": "idle", "detail": "", "head": head }).to_string();
     let reply = report(&server, Some(&bearer("blackbox")), &body);
-    assert_eq!(reply.status, 204, "{}", reply.body);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert!(
+        reply.body.contains("git-upload-pack"),
+        "the Git request is answered"
+    );
     let blackbox = machine(&server, "blackbox");
     assert_eq!(blackbox["state"], "idle");
     assert_eq!(blackbox["detail"], "");
@@ -102,15 +114,24 @@ fn every_machine_is_listed_with_its_last_git_request_and_report() {
     )
     .unwrap();
     let reply = report(&server, Some(&bearer("cassia")), &example);
-    assert_eq!(reply.status, 204, "{}", reply.body);
+    assert_eq!(reply.status, 200, "{}", reply.body);
     let cassia = machine(&server, "cassia");
     assert_eq!(cassia["state"], "blocked");
     assert_eq!(cassia["detail"], "a merge is in progress");
-    assert_eq!(cassia["seen"], Value::Null, "a report is not a Git request");
+    assert_eq!(
+        cassia["seen"],
+        Value::Null,
+        "a request that carries a report is not a sync"
+    );
+    assert_eq!(
+        server.post("/git/status", &[], example.as_bytes()).status,
+        404,
+        "reports have no route of their own"
+    );
 }
 
 #[test]
-fn a_report_needs_a_token_and_a_well_formed_body() {
+fn a_report_needs_a_token_and_a_well_formed_header() {
     let server = Server::empty(&Isolation::new());
     let good = json!({ "state": "idle", "detail": "", "head": null }).to_string();
     let unauthorized = report(&server, None, &good);
@@ -122,9 +143,13 @@ fn a_report_needs_a_token_and_a_well_formed_body() {
     );
 
     let blackbox = bearer("blackbox");
-    let not_json = report(&server, Some(&blackbox), "not json");
-    assert_eq!(not_json.status, 400);
-    assert!(not_json.json()["error"].is_string());
+    for garbled in [
+        report_raw(&server, Some(&blackbox), "not base64!"),
+        report(&server, Some(&blackbox), "not json"),
+    ] {
+        assert_eq!(garbled.status, 400, "{}", garbled.body);
+        assert!(garbled.json()["error"].is_string());
+    }
     for body in [
         json!({ "detail": "", "head": null }).to_string(),
         json!({ "state": "idle", "detail": "", "head": null, "more": 1 }).to_string(),
@@ -137,13 +162,19 @@ fn a_report_needs_a_token_and_a_well_formed_body() {
         assert_eq!(reply.status, 422, "{body}");
         assert!(reply.json()["error"].is_string(), "{body}");
     }
-    let huge = json!({ "state": "idle", "detail": "x".repeat(8 << 10), "head": null });
+    let huge = json!({ "state": "idle", "detail": "x".repeat(3 << 10), "head": null });
     assert_eq!(
         report(&server, Some(&blackbox), &huge.to_string()).status,
         413
     );
-    assert_eq!(machine(&server, "blackbox")["state"], Value::Null);
-    assert_eq!(report(&server, Some(&blackbox), &good).status, 204);
+    let blackbox_now = machine(&server, "blackbox");
+    assert_eq!(blackbox_now["state"], Value::Null, "no bad report was kept");
+    assert_eq!(
+        blackbox_now["seen"],
+        Value::Null,
+        "no refused request was a sync"
+    );
+    assert_eq!(report(&server, Some(&blackbox), &good).status, 200);
     let stored = machine(&server, "blackbox");
     assert_eq!(stored["state"], "idle");
     assert_eq!(stored["head"], Value::Null);

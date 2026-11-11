@@ -36,9 +36,11 @@ Choices made while building Mneme that the design brief left open or that differ
 
 ## Machine status
 
-- **`seen` counts Git requests only.** A report leaves it alone, so a service that still reports but no longer syncs shows its last sync.
-- **A machine also has `reported`,** the time its last report arrived, which the brief did not list. A blocked service makes no Git requests, so without it a blocked service that still reports would look like a stopped one.
-- **A report is checked at the door.** `state` is 1 to 64 bytes, `detail` at most 1 KiB, `head` a full lowercase commit id or `null`, and no other field. A body that is not JSON is `400`, one of the wrong shape or with a bad value `422`, and one over 4 KiB `413`, as axum answers them.
+- **A report is a header on a Git request,** `Mneme-Report` with the JSON in base64, sent with `git ls-remote` when it is due. It used to be a `POST /git/status` from a second HTTP client in the service, `ureq` with its own TLS stack and certificates, which was never tested against TLS here and could disagree with Git about the server. Now Git sends it with the system's certificates and any proxy Git is set up to use, exactly as it syncs. The route and `ureq` are gone, and with them `rustls`, `ring` and `webpki-roots`. The release binary went from 15,327,408 to 12,588,536 bytes.
+- **The report gets a request of its own** instead of riding on a fetch or a push. The tick's outcome is known only at its end, after both, so a fetch could only carry the tick before. `ls-remote` with the server's URL needs no repository, so a service that the folder guard stops before any fetch still reports. It speaks protocol version 0, which lists the refs in one request where version 2 takes two, each a `git http-backend` on the server: 48 seeds of the simulation took 29.7 to 31.4 s that way and 37.0 to 39.5 s with version 2, against about 25 s with the old `POST`.
+- **`seen` counts Git requests that carry no report,** the fetches and pushes. A report leaves it alone, so a service that still reports but no longer syncs shows its last sync.
+- **A machine also has `reported`,** the time its last report arrived, which the brief did not list. A blocked service makes no fetch, so without it a blocked service that still reports would look like a stopped one.
+- **A report is checked at the door.** `state` is 1 to 64 bytes, `detail` at most 1 KiB, `head` a full lowercase commit id or `null`, and no other field. A header over 4 KiB is `413`, one that is not base64 or not JSON `400`, and a report of the wrong shape or with a bad value `422`. The Git request is then not run, so `ls-remote` fails and the service sends the report again on the next tick.
 
 ## Autosave
 

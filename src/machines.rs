@@ -4,12 +4,18 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
+/// The header an autosave service sends its report in, on a Git request.
+pub const REPORT_HEADER: &str = "Mneme-Report";
+/// The longest report header value.
+pub const MAX_REPORT: usize = 4 << 10;
 const MAX_STATE: usize = 64;
 const MAX_DETAIL: usize = 1024;
 
-/// What an autosave service reports with `POST /git/status`.
+/// What an autosave service reports, as JSON in base64 in its [`REPORT_HEADER`].
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Report {
@@ -21,10 +27,50 @@ pub struct Report {
     pub head: Option<String>,
 }
 
+/// Why a report header cannot be stored.
+#[derive(Debug)]
+pub enum Unreadable {
+    TooLarge,
+    /// Not base64, or not JSON once decoded.
+    Garbled(String),
+    /// JSON with missing or unknown fields, or a bad value.
+    Wrong(String),
+}
+
 impl Report {
-    /// Why the report cannot be stored, or `None` when it can.
+    /// The report as a header value.
     #[must_use]
-    pub fn problem(&self) -> Option<&'static str> {
+    pub fn encode(&self) -> String {
+        STANDARD.encode(serde_json::to_vec(self).unwrap_or_default())
+    }
+
+    /// Reads a report header value.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the value is too long, garbled, or not a report that can be stored.
+    pub fn decode(value: &[u8]) -> Result<Self, Unreadable> {
+        if value.len() > MAX_REPORT {
+            return Err(Unreadable::TooLarge);
+        }
+        let json = STANDARD
+            .decode(value)
+            .map_err(|error| Unreadable::Garbled(format!("the report is not base64: {error}")))?;
+        let report: Self = serde_json::from_slice(&json).map_err(|error| {
+            if error.is_data() {
+                Unreadable::Wrong(error.to_string())
+            } else {
+                Unreadable::Garbled(format!("the report is not JSON: {error}"))
+            }
+        })?;
+        match report.problem() {
+            Some(problem) => Err(Unreadable::Wrong(problem.to_owned())),
+            None => Ok(report),
+        }
+    }
+
+    /// Why the report cannot be stored, or `None` when it can.
+    fn problem(&self) -> Option<&'static str> {
         if self.state.is_empty() || self.state.len() > MAX_STATE {
             return Some("state is empty or too long");
         }

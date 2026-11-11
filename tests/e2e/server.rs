@@ -1,7 +1,9 @@
 //! The real `mneme serve` on a free port, and plain HTTP to it.
 
+use std::fmt::Write as _;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -11,7 +13,6 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tempfile::TempDir;
-use ureq::Agent;
 
 use crate::git::{Isolation, Work};
 
@@ -31,13 +32,12 @@ pub struct Server {
     repo: PathBuf,
     log: Arc<Mutex<Vec<String>>>,
     reader: Option<thread::JoinHandle<()>>,
-    agent: Agent,
     _dirs: Vec<TempDir>,
 }
 
 pub struct Reply {
     pub status: u16,
-    pub headers: ureq::http::HeaderMap,
+    pub headers: Vec<(String, String)>,
     pub body: String,
 }
 
@@ -47,7 +47,61 @@ impl Reply {
     }
 
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(name).and_then(|value| value.to_str().ok())
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// An HTTP/1.1 response read to the end of the connection.
+    fn parse(raw: &[u8]) -> Self {
+        let split = raw
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("a response with headers");
+        let head = String::from_utf8(raw[..split].to_vec()).unwrap();
+        let mut lines = head.split("\r\n");
+        let status = lines
+            .next()
+            .unwrap()
+            .split(' ')
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let headers: Vec<(String, String)> = lines
+            .map(|line| {
+                let (key, value) = line.split_once(':').unwrap();
+                (key.to_owned(), value.trim().to_owned())
+            })
+            .collect();
+        let mut body = raw[split + 4..].to_vec();
+        let chunked = headers.iter().any(|(key, value)| {
+            key.eq_ignore_ascii_case("transfer-encoding") && value.eq_ignore_ascii_case("chunked")
+        });
+        if chunked {
+            body = dechunk(&body);
+        }
+        Self {
+            status,
+            headers,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        }
+    }
+}
+
+/// The body of a chunked response.
+fn dechunk(mut raw: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    loop {
+        let end = raw.windows(2).position(|pair| pair == b"\r\n").unwrap();
+        let size = std::str::from_utf8(&raw[..end]).unwrap();
+        let size = usize::from_str_radix(size.split(';').next().unwrap().trim(), 16).unwrap();
+        if size == 0 {
+            return body;
+        }
+        body.extend_from_slice(&raw[end + 2..end + 2 + size]);
+        raw = &raw[end + 2 + size + 2..];
     }
 }
 
@@ -108,17 +162,12 @@ impl Server {
         let addr = listening
             .recv_timeout(Duration::from_secs(60))
             .unwrap_or_else(|_| panic!("the server did not start: {:?}", log.lock().unwrap()));
-        let agent = Agent::config_builder()
-            .http_status_as_error(false)
-            .build()
-            .into();
         Self {
             child,
             url: format!("http://{addr}"),
             repo,
             log,
             reader: Some(reader),
-            agent,
             _dirs: dirs,
         }
     }
@@ -132,11 +181,27 @@ impl Server {
     }
 
     pub fn post(&self, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Reply {
-        let mut request = self.agent.post(format!("{}{path}", self.url));
+        self.request("POST", path, headers, body)
+    }
+
+    /// One request on a connection of its own, which the server closes after the response.
+    fn request(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Reply {
+        let addr = self.url.trim_start_matches("http://");
+        let mut head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+             Content-Length: {}\r\n",
+            body.len()
+        );
         for (name, value) in headers {
-            request = request.header(*name, *value);
+            let _ = write!(head, "{name}: {value}\r\n");
         }
-        reply(request.send(body).unwrap())
+        head.push_str("\r\n");
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        Reply::parse(&raw)
     }
 
     /// Sends SIGTERM, waits for the server to exit, and returns its status and whole log.
@@ -154,11 +219,7 @@ impl Server {
     }
 
     pub fn get_with(&self, path: &str, headers: &[(&str, &str)]) -> Reply {
-        let mut request = self.agent.get(format!("{}{path}", self.url));
-        for (name, value) in headers {
-            request = request.header(*name, *value);
-        }
-        reply(request.call().unwrap())
+        self.request("GET", path, headers, b"")
     }
 
     /// A 200 answer as JSON.
@@ -198,14 +259,6 @@ fn mneme_hash(token: &str) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .concat()
-}
-
-fn reply(mut response: ureq::http::Response<ureq::Body>) -> Reply {
-    Reply {
-        status: response.status().as_u16(),
-        headers: response.headers().clone(),
-        body: response.body_mut().read_to_string().unwrap(),
-    }
 }
 
 impl Drop for Server {

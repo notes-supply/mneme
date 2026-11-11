@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 
 use crate::git::{self, Work};
@@ -405,18 +407,20 @@ fn every_route_answers_in_the_shape_of_its_example_file() {
     let alpha = id(&alpha);
     let extra = format!("http.extraHeader={AUTHORIZATION}");
     work.ok(&["-c", &extra, "ls-remote", &server.git_url()]);
-    let reply = server.post(
-        "/git/status",
+    let report: Value =
+        serde_json::from_slice(&fs::read(examples().join("report.json")).unwrap()).unwrap();
+    let report = STANDARD.encode(report.to_string());
+    let reply = server.get_with(
+        "/git/wiki.git/info/refs?service=git-upload-pack",
         &[
             (
                 "authorization",
                 AUTHORIZATION.trim_start_matches("Authorization: "),
             ),
-            ("content-type", "application/json"),
+            ("mneme-report", &report),
         ],
-        &fs::read(examples().join("report.json")).unwrap(),
     );
-    assert_eq!(reply.status, 204, "{}", reply.body);
+    assert_eq!(reply.status, 200, "{}", reply.body);
     let routes = [
         ("status", "/v1/status".to_owned()),
         ("pages", "/v1/pages?deleted=true".to_owned()),

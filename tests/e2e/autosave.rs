@@ -117,6 +117,62 @@ impl Wiki {
             .filter(|line| line["event"] == "push")
             .count()
     }
+
+    /// What `/v1/machines` says of this clone's machine.
+    fn reported(&self) -> Value {
+        let listing = self.server.json("/v1/machines");
+        listing["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|machine| machine["name"] == MACHINES[1].0)
+            .unwrap()
+            .clone()
+    }
+
+    /// The path of every request the server logged with this clone's token.
+    fn requests(&self) -> Vec<String> {
+        self.server
+            .log_with("/v1/machines")
+            .iter()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|line| line["event"] == "request" && line["machine"] == MACHINES[1].0)
+            .map(|line| line["path"].as_str().unwrap().to_owned())
+            .collect()
+    }
+}
+
+/// The report travels on Git's own HTTP path, so it trusts the same certificates as syncing
+/// does, and it still goes out when the folder guard stops the tick before any fetch.
+#[test]
+fn the_service_reports_its_state_with_a_git_request() {
+    let mut wiki = Wiki::new();
+    wiki.write("page-1.md", "# Page 1\n\nan edit\n");
+    assert_eq!(wiki.tick(), Outcome::Pushed);
+    let reported = wiki.reported();
+    assert_eq!(reported["state"], "pushed");
+    assert_eq!(reported["head"], wiki.head().as_str());
+    assert_eq!(reported["current"], true);
+
+    fs::rename(wiki.path().join(".git"), wiki.path().join("git-away")).unwrap();
+    let reason = "the folder is not a Git repository";
+    assert_eq!(wiki.tick(), Outcome::Blocked(reason.to_owned()));
+    let reported = wiki.reported();
+    assert_eq!(reported["state"], "blocked");
+    assert_eq!(reported["detail"], reason);
+    assert_eq!(reported["head"], Value::Null);
+
+    let requests = wiki.requests();
+    assert!(
+        requests.len() >= 3,
+        "a fetch, a push and reports: {requests:?}"
+    );
+    for path in requests {
+        assert!(
+            path.starts_with("/git/wiki.git/"),
+            "{path} is not a Git route"
+        );
+    }
 }
 
 #[test]
