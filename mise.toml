@@ -10,6 +10,7 @@ rust = { version = "nightly-2026-10-28", profile = "minimal", components = "rust
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
 "aqua:rhysd/actionlint" = "1.7.12"
 "aqua:zizmorcore/zizmor" = "1.30.1"
+"aqua:aquasecurity/trivy" = "0.76.2"
 
 [tasks.fmt]
 description = "Format the Rust sources"
@@ -42,6 +43,10 @@ run = [
   "MNEME_SIM_SEEDS=2000 cargo nextest run --locked --no-capture -E 'test(three_clones)'",
   "for seed in $(seq 1 20); do MNEME_KILL_SEED=$seed cargo nextest run --locked -E 'test(services_killed)' || exit 1; done",
 ]
+
+[tasks.image]
+description = "Build the server's image and check it with a real clone and push and a Trivy scan"
+run = "scripts/image.sh"
 
 [tasks.gate]
 description = "Everything that proves the repository is good"
