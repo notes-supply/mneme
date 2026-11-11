@@ -29,6 +29,8 @@ const PREFIX: &str = "/git/wiki.git";
 /// The largest request body, a pack included.
 const MAX_BODY: u64 = 64 << 20;
 const MAX_HEADERS: usize = 64 << 10;
+/// How much of the child's standard error is logged. The rest is read and dropped.
+const MAX_STDERR: u64 = 16 << 10;
 
 /// The machine a Git request came from, for the request log.
 #[derive(Clone, Debug)]
@@ -155,9 +157,10 @@ async fn cgi(wiki: Arc<Wiki>, machine: &str, request: Request) -> Result<Respons
     let errors = tokio::spawn(async move {
         let mut text = String::new();
         let _ = (&mut stderr)
-            .take(MAX_HEADERS as u64)
+            .take(MAX_STDERR)
             .read_to_string(&mut text)
             .await;
+        let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
         text
     });
     let (status, headers) = cgi_headers(&mut stdout).await?;
@@ -166,15 +169,15 @@ async fn cgi(wiki: Arc<Wiki>, machine: &str, request: Request) -> Result<Respons
     tokio::spawn(async move {
         pump(stdout, &sender).await;
         let exit = child.wait().await.ok().and_then(|status| status.code());
-        let body = feeding
+        let body_error = feeding
             .await
             .ok()
-            .and_then(|fed| fed.err().map(|e| format!("{e:#}")));
+            .and_then(|fed| fed.err().map(|error| format!("{error:#}")));
         let stderr = errors.await.unwrap_or_default();
-        if !stderr.trim().is_empty() || body.is_some() {
+        if !stderr.trim().is_empty() || body_error.is_some() {
             log::emit(
                 "git",
-                json!({ "machine": machine, "stderr": stderr.trim(), "body": body }),
+                json!({ "machine": machine, "stderr": stderr.trim(), "body": body_error }),
             );
         }
         if push {

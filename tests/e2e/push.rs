@@ -45,6 +45,7 @@ fn clone_commit_push_and_read_the_change() {
     let config = |key: &str| work.git.ok(repo, &["--git-dir", ".", "config", key]);
     assert_eq!(config("receive.denyNonFastForwards").trim(), "true");
     assert_eq!(config("receive.denyDeletes").trim(), "true");
+    assert_eq!(config("http.receivepack").trim(), "true");
     let hook = std::fs::metadata(repo.join("hooks/pre-receive")).unwrap();
     assert_eq!(hook.permissions().mode() & 0o111, 0o111);
 

@@ -259,6 +259,7 @@ fn search_finds_phrases_prefixes_and_exclusions() {
     assert_eq!(prefixed, ["harbour.md", "storm.md"]);
     assert_eq!(hits(&server, "harbour%20-storm"), ["harbour.md"]);
     assert_eq!(hits(&server, "cafe"), ["café.md"], "diacritics are removed");
+    assert_versions_match_git(&server, &work);
 }
 
 #[test]

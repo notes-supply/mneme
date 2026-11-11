@@ -206,7 +206,14 @@ pub(super) fn version_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Version> 
         "created" => Kind::Created,
         "edited" => Kind::Edited,
         "renamed" => Kind::Renamed { from: row.get(6)? },
-        _ => Kind::Deleted,
+        "deleted" => Kind::Deleted,
+        other => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                format!("unknown kind {other}").into(),
+            ));
+        }
     };
     Ok(Version {
         commit: row.get(0)?,
