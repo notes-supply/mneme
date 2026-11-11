@@ -95,6 +95,8 @@ pub struct Version {
     pub added: u32,
     pub removed: u32,
     pub overlap: Option<String>,
+    /// The author of the `overlap` commit, when that commit is on `main`.
+    pub overlap_author: Option<String>,
 }
 
 /// The facts the status route reports.
@@ -119,8 +121,9 @@ pub(super) const PAGE_COLUMNS: &str = "p.id, p.path, p.title, p.words, p.created
      p.deleted";
 
 pub(super) const VERSION_SELECT: &str = "SELECT c.id, p.id, v.path, c.time, c.author, v.kind, v.from_path, \
-     v.version, v.words, v.added, v.removed, c.overlap \
-     FROM versions v JOIN commits c ON c.seq = v.commit_seq JOIN pages p ON p.rowid = v.page";
+     v.version, v.words, v.added, v.removed, c.overlap, o.author \
+     FROM versions v JOIN commits c ON c.seq = v.commit_seq JOIN pages p ON p.rowid = v.page \
+     LEFT JOIN commits o ON o.id = c.overlap";
 
 impl Index {
     /// Builds the index of every commit on `main`.
@@ -230,5 +233,6 @@ pub(super) fn version_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Version> 
         added: row.get(9)?,
         removed: row.get(10)?,
         overlap: row.get(11)?,
+        overlap_author: row.get(12)?,
     })
 }

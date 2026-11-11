@@ -163,14 +163,57 @@ fn the_overlap_trailer_and_the_author_are_recorded() {
     let work = git::standard();
     let server = Server::of(&work);
     let agents = events(&server, &live_page(&server, "AGENTS.md"));
-    assert_eq!(agents[0]["overlap"], "aeolus");
+    let start = work.ok(&["rev-list", "--max-parents=0", "main"]);
+    assert_eq!(agents[0]["overlap"], start.trim());
+    assert_eq!(agents[0]["overlap_author"], "Writer");
     assert_eq!(agents[1]["overlap"], Value::Null);
+    assert_eq!(agents[1]["overlap_author"], Value::Null);
     assert_eq!(agents[0]["author"], "Writer");
     assert_eq!(
         agents[0]["time"],
         git::START + 8 * 600,
         "author time of the eighth commit"
     );
+}
+
+#[test]
+fn the_author_of_the_edit_that_lost_is_read_from_main() {
+    let work = Work::new();
+    work.write("p.md", "# P\n\none\n");
+    work.commit("Start");
+    work.write("p.md", "# P\n\nfrom aeolus\n");
+    work.ok(&["add", "-A"]);
+    work.ok(&[
+        "commit",
+        "-q",
+        "--author=aeolus <autosave@aeolus>",
+        "-m",
+        "Save p.md",
+    ]);
+    let lost = work.ok(&["rev-parse", "HEAD"]).trim().to_owned();
+    work.ok(&["branch", "aside"]);
+    work.write("p.md", "# P\n\nnot on main\n");
+    work.ok(&["checkout", "-q", "aside"]);
+    let aside = work.commit("A commit only on a branch");
+    work.ok(&["checkout", "-q", "main"]);
+    work.write("p.md", "# P\n\nfrom blackbox\n");
+    work.commit(&format!("Save p.md\n\nOverlap: {lost}"));
+    work.write("p.md", "# P\n\nagain\n");
+    work.commit(&format!("Save p.md\n\nOverlap: {aside}"));
+    work.ok(&["branch", "-D", "aside"]);
+    let server = Server::of(&work);
+    let changes = server.json("/v1/changes");
+    let events = changes["events"].as_array().unwrap();
+    assert_eq!(events[0]["overlap"], aside.as_str());
+    assert_eq!(
+        events[0]["overlap_author"],
+        Value::Null,
+        "a commit that is not on main has no author here"
+    );
+    assert_eq!(events[1]["overlap"], lost.as_str());
+    assert_eq!(events[1]["overlap_author"], "aeolus");
+    assert_eq!(events[1]["author"], "Writer");
+    assert_eq!(events[2]["overlap_author"], Value::Null);
 }
 
 #[test]

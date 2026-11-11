@@ -247,7 +247,7 @@ pub fn standard() -> Work {
     );
     work.write("notes/deep.md", "Deep note without a heading.\n");
     work.write("notes/readme.txt", "Not a page.\n");
-    work.commit("Start the wiki");
+    let start = work.commit("Start the wiki");
 
     work.write(
         "alpha.md",
@@ -285,7 +285,7 @@ pub fn standard() -> Work {
         "# Agents\n\nHow agents work in this wiki, with care.\n\n## Open questions\n\n\
          - Should agents sign their pages?\n- Who reads what an agent *wrote*?\n",
     );
-    work.commit("Save AGENTS.md\n\nOverlap: aeolus");
+    work.commit(&format!("Save AGENTS.md\n\nOverlap: {start}"));
 
     work.write("notes/readme.txt", "Still not a page.\n");
     work.commit("Edit a file that is not a page");

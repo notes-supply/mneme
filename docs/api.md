@@ -47,7 +47,7 @@ Example: [`page.json`](../tests/fixtures/api/page.json).
 
 The page's events, newest first, as `{ "total", "events": [Event] }`. Parameters are `limit`, `offset` and `since` (a time; only events at or after it).
 
-An `Event` has `commit`, `page`, `path` (after the event), `time`, `author` (the commit's author name), `kind` (`created`, `edited`, `renamed` or `deleted`), `from` (the old path, only for `renamed`), `version`, `words` (after the event), `added`, `removed` and `overlap`. A rename that also changes the text is one `renamed` event with `"version": true`. A deletion removes all the page's words. `overlap` is the value of an `Overlap:` trailer in the commit message, which the autosave service writes when it had to pick a side, or `null`.
+An `Event` has `commit`, `page`, `path` (after the event), `time`, `author` (the commit's author name), `kind` (`created`, `edited`, `renamed` or `deleted`), `from` (the old path, only for `renamed`), `version`, `words` (after the event), `added`, `removed`, `overlap` and `overlap_author`. A rename that also changes the text is one `renamed` event with `"version": true`. A deletion removes all the page's words. `overlap` is the value of an `Overlap:` trailer in the commit message, which the autosave service writes when it had to pick a side, or `null`. It names the commit of the edit that lost. `overlap_author` is that commit's author name, or `null` when `overlap` is `null` or names no commit on `main`.
 
 Example: [`versions.json`](../tests/fixtures/api/versions.json).
 
