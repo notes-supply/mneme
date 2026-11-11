@@ -80,11 +80,9 @@ pub fn check(updates: impl BufRead) -> Result<Result<(), Refusal>> {
         if new.bytes().all(|b| b == b'0') {
             return Ok(Err(Refusal::Deletion));
         }
-        for commit in git(&["rev-list", "-z", "--parents", new, "--not", "--all"])?
-            .split(|&b| b == 0)
-            .filter(|record| !record.is_empty())
-        {
-            let commit = String::from_utf8_lossy(commit);
+        // One commit per line: rev-list ends its records with NUL under -z only since Git 2.50.
+        let listing = git(&["rev-list", "--parents", new, "--not", "--all"])?;
+        for commit in String::from_utf8_lossy(&listing).lines() {
             let mut ids = commit.split(' ');
             let id = ids.next().unwrap_or_default().to_owned();
             if ids.count() > 1 {
