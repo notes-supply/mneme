@@ -19,6 +19,9 @@ backend = "aqua:aquasecurity/trivy"
 specifiers = ["0.76.2"]
 
 [tools."aqua:aquasecurity/trivy"."platforms.linux-x64"]
+checksum = "sha256:bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf"
+url = "https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz"
+url_api = "https://api.github.com/repos/aquasecurity/trivy/releases/assets/713401165"
 provenance = "cosign"
 
 [[tools."aqua:nextest-rs/nextest/cargo-nextest"]]
