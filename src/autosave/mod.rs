@@ -8,11 +8,14 @@ mod git;
 mod replay;
 
 use std::fmt;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
+use serde_json::json;
 
+use crate::log;
 use crate::machines::Report;
 pub use cli::{Command, main};
 use folder::Folder;
@@ -48,6 +51,10 @@ pub struct Config {
     pub fetch_every: Duration,
     /// How often to report the state when it has not changed.
     pub report_every: Duration,
+    /// How long `index.lock` may sit unchanged before it counts as a dead command's. A live
+    /// command that holds it keeps writing it, and none in a wiki folder writes the index for
+    /// minutes.
+    pub stale_lock: Duration,
 }
 
 /// What a tick did, or why it did nothing.
@@ -174,7 +181,7 @@ impl Autosave {
     }
 
     fn step(&mut self, now: SystemTime) -> Result<(Outcome, Option<String>)> {
-        if let Some(reason) = self.blocked() {
+        if let Some(reason) = self.blocked(now)? {
             return Ok((Outcome::Blocked(reason), None));
         }
         let folder = Folder::read(&self.git)?;
@@ -233,17 +240,39 @@ impl Autosave {
         Ok((outcome, head))
     }
 
-    /// Why the folder must not be touched now, from what Git leaves in `.git`.
-    fn blocked(&self) -> Option<String> {
+    /// Why the folder must not be touched now, from what Git leaves in `.git`. An
+    /// `index.lock` unchanged for longer than the stale time was left by a command that died,
+    /// so it goes, and the tick carries on.
+    fn blocked(&self, now: SystemTime) -> Result<Option<String>> {
         let git_dir = self.git.git_dir();
         if !git_dir.is_dir() {
-            return Some("the folder is not a Git repository".to_owned());
+            return Ok(Some("the folder is not a Git repository".to_owned()));
         }
-        [
-            (
-                "index.lock",
-                "index.lock exists: another Git command is running, or one was killed",
-            ),
+        let lock = git_dir.join("index.lock");
+        if let Ok(metadata) = lock.symlink_metadata() {
+            let age = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .unwrap_or_default();
+            if age <= self.config.stale_lock {
+                return Ok(Some(format!(
+                    "index.lock is {} s old: another Git command is running, or one was killed",
+                    age.as_secs()
+                )));
+            }
+            match std::fs::remove_file(&lock) {
+                Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
+                _ => log::emit(
+                    "stale lock removed",
+                    json!({ "age_seconds": age.as_secs() }),
+                ),
+            }
+            if let Some(reason) = self.repair_index()? {
+                return Ok(Some(reason));
+            }
+        }
+        Ok([
             ("rebase-merge", "a rebase is in progress"),
             ("rebase-apply", "a rebase or am is in progress"),
             ("MERGE_HEAD", "a merge is in progress"),
@@ -254,7 +283,25 @@ impl Autosave {
         ]
         .into_iter()
         .find(|(name, _)| git_dir.join(name).exists())
-        .map(|(_, reason)| reason.to_owned())
+        .map(|(_, reason)| reason.to_owned()))
+    }
+
+    /// Reads the index again from `HEAD` when the command that died left it unreadable. Only
+    /// the index changes, so every edit in the folder stays and shows as a change to save.
+    fn repair_index(&self) -> Result<Option<String>> {
+        if Folder::read(&self.git).is_ok() {
+            return Ok(None);
+        }
+        let run = if self.head()?.is_some() {
+            self.git.run(&["read-tree", "HEAD"])?
+        } else {
+            self.git.run(&["read-tree", "--empty"])?
+        };
+        if !run.success {
+            return Ok(Some(run.error()));
+        }
+        log::emit("index rebuilt", json!({ "from": "HEAD" }));
+        Ok(None)
     }
 
     /// Commits everything, unless that would delete more than half of the pages and more

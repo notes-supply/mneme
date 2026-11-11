@@ -22,6 +22,7 @@ use crate::server::{MACHINES, Server};
 
 const QUIET: Duration = Duration::from_secs(15);
 const FETCH_EVERY: Duration = Duration::from_secs(30);
+const STALE_LOCK: Duration = Duration::from_secs(300);
 /// The fake clock starts at 2027-01-15T08:00:00Z.
 const START: u64 = 1_800_000_000;
 /// Port 9 is discard, which nothing on the test machine listens on.
@@ -349,6 +350,7 @@ impl Sim {
             quiet: QUIET,
             fetch_every: FETCH_EVERY,
             report_every: Duration::from_secs(300),
+            stale_lock: STALE_LOCK,
         });
         let mut clone = Clone {
             machine,

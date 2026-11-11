@@ -57,6 +57,7 @@ impl Wiki {
             quiet: QUIET,
             fetch_every: Duration::from_secs(30),
             report_every: Duration::from_secs(300),
+            stale_lock: Duration::from_secs(300),
         });
         Self {
             server,
@@ -281,11 +282,10 @@ fn every_blocked_reason_leaves_the_folder_as_it_is() {
             );
         }
     }
-    let lock = wiki.path().join(".git/index.lock");
-    fs::write(&lock, "").unwrap();
-    let reason = "index.lock exists: another Git command is running, or one was killed";
+    wiki.write(".git/index.lock", "");
+    let reason = "index.lock is 16 s old: another Git command is running, or one was killed";
     assert_blocked(&mut wiki, reason, ".git");
-    fs::remove_file(&lock).unwrap();
+    fs::remove_file(wiki.path().join(".git/index.lock")).unwrap();
     fs::rename(wiki.path().join(".git"), wiki.path().join("git-away")).unwrap();
     assert_blocked(&mut wiki, "the folder is not a Git repository", "git-away");
     fs::rename(wiki.path().join("git-away"), wiki.path().join(".git")).unwrap();
@@ -466,4 +466,107 @@ fn a_push_that_loses_a_race_on_the_server_is_tried_again() {
         page, "# Page 9\n\nwritten elsewhere\n",
         "the other machine's edit is kept"
     );
+}
+
+/// `git update-index --index-info` takes `index.lock` and then waits for its input, so killing
+/// it with SIGKILL leaves the lock behind as a crash would.
+fn leave_a_lock_by_killing_git(wiki: &Wiki) {
+    let mut child = wiki
+        .git
+        .apply(
+            Command::new("git")
+                .current_dir(wiki.path())
+                .args(["update-index", "--index-info"]),
+        )
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let lock = wiki.path().join(".git/index.lock");
+    while !lock.exists() {
+        std::thread::yield_now();
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(lock.exists(), "SIGKILL left the lock");
+    File::options()
+        .write(true)
+        .open(&lock)
+        .unwrap()
+        .set_modified(wiki.now)
+        .unwrap();
+}
+
+#[test]
+fn a_lock_left_by_a_killed_git_command_goes_once_it_is_stale() {
+    let mut wiki = Wiki::new();
+    wiki.write("page-1.md", "# Page 1\n\nan unsaved edit\n");
+    leave_a_lock_by_killing_git(&wiki);
+    let head = wiki.head();
+    let Outcome::Blocked(reason) = wiki.tick() else {
+        panic!("a lock younger than the stale time blocks the tick");
+    };
+    assert!(reason.starts_with("index.lock is 16 s old"), "{reason}");
+    assert!(
+        wiki.path().join(".git/index.lock").exists(),
+        "a young lock is left alone"
+    );
+    assert_eq!(wiki.head(), head);
+
+    wiki.now += Duration::from_secs(300);
+    assert_eq!(
+        wiki.tick(),
+        Outcome::Pushed,
+        "the stale lock goes and the save goes through"
+    );
+    assert!(!wiki.path().join(".git/index.lock").exists());
+    assert_eq!(
+        wiki.ok(&["show", "HEAD:page-1.md"]),
+        "# Page 1\n\nan unsaved edit\n"
+    );
+    assert_eq!(wiki.server_head(), wiki.head());
+}
+
+#[test]
+fn a_lock_that_keeps_being_written_is_never_removed() {
+    let mut wiki = Wiki::new();
+    wiki.write("page-1.md", "# Page 1\n\nan unsaved edit\n");
+    let head = wiki.head();
+    for _ in 0..40 {
+        wiki.write(".git/index.lock", "a command still writing");
+        let outcome = wiki.tick();
+        assert!(matches!(outcome, Outcome::Blocked(_)), "{outcome:?}");
+    }
+    assert!(wiki.now > UNIX_EPOCH + Duration::from_secs(START + 600));
+    assert!(wiki.path().join(".git/index.lock").exists());
+    assert_eq!(wiki.head(), head, "nothing was committed under a live lock");
+}
+
+#[test]
+fn an_index_a_dead_command_left_unreadable_is_read_again_from_head() {
+    let mut wiki = Wiki::new();
+    wiki.write("page-1.md", "# Page 1\n\nan unsaved edit\n");
+    wiki.write("new.md", "# New\n\nnot saved yet\n");
+    leave_a_lock_by_killing_git(&wiki);
+    fs::write(wiki.path().join(".git/index"), "half an index").unwrap();
+    assert!(
+        !wiki.git(&["status"]).status.success(),
+        "the index cannot be read"
+    );
+
+    wiki.now += Duration::from_secs(300);
+    assert_eq!(wiki.tick(), Outcome::Pushed);
+    assert_eq!(
+        fs::read_to_string(wiki.path().join("page-1.md")).unwrap(),
+        "# Page 1\n\nan unsaved edit\n",
+        "the work tree was not touched"
+    );
+    assert_eq!(
+        wiki.ok(&["show", "HEAD:page-1.md"]),
+        "# Page 1\n\nan unsaved edit\n"
+    );
+    assert_eq!(
+        wiki.ok(&["show", "HEAD:new.md"]),
+        "# New\n\nnot saved yet\n"
+    );
+    assert_eq!(wiki.ok(&["status", "--porcelain"]), "");
 }

@@ -47,6 +47,10 @@ pub struct Run {
     /// Seconds between reports of a state that has not changed.
     #[arg(long, default_value = "300", value_parser = seconds)]
     pub report_seconds: Duration,
+    /// Seconds `.git/index.lock` may sit unchanged before it counts as a dead command's and
+    /// is removed.
+    #[arg(long, default_value = "300", value_parser = seconds)]
+    pub stale_lock: Duration,
 }
 
 /// A number of seconds, which may have a fraction, as a duration.
@@ -98,6 +102,7 @@ impl Target {
             quiet: timing(|run| run.quiet_seconds, 15),
             fetch_every: timing(|run| run.fetch_seconds, 30),
             report_every: timing(|run| run.report_seconds, 300),
+            stale_lock: timing(|run| run.stale_lock, 300),
         })
     }
 }

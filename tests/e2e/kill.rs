@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -168,6 +168,19 @@ fn init_folders(
     folders
 }
 
+/// Leaves an `index.lock` an hour old in `folder`, as a Git command killed with its service
+/// would have, unless a command that is still running holds the lock. Git takes the lock with
+/// an exclusive create, and so does this.
+fn leave_dead_lock(folder: &Path) -> bool {
+    let lock = folder.join(".git/index.lock");
+    let Ok(file) = fs::File::options().write(true).create_new(true).open(&lock) else {
+        return false;
+    };
+    file.set_modified(SystemTime::now() - Duration::from_secs(3600))
+        .unwrap();
+    true
+}
+
 /// Waits until the server and every folder hold exactly `union`, all on one head.
 fn wait_until_settled(
     git: &Isolation,
@@ -216,6 +229,7 @@ fn services_killed_at_random_moments_lose_nothing() {
     let mut logs: Vec<Vec<String>> = vec![Vec::new(); folders.len()];
     let mut expected: Vec<BTreeMap<String, String>> = vec![BTreeMap::new(); folders.len()];
     let mut kills = 0;
+    let mut dead_locks = vec![0; folders.len()];
     for round in 0..80 {
         let at = rng.usize(..folders.len());
         let folder = &folders[at].0;
@@ -233,6 +247,9 @@ fn services_killed_at_random_moments_lose_nothing() {
             let victim = rng.usize(..folders.len());
             logs[victim].extend(services[victim].take().unwrap().kill());
             kills += 1;
+            if rng.u32(..3) == 0 && leave_dead_lock(&folders[victim].0) {
+                dead_locks[victim] += 1;
+            }
             thread::sleep(Duration::from_millis(rng.u64(..60)));
             services[victim] = Some(Service::start(&git, &folders[victim].1));
         }
@@ -269,9 +286,23 @@ fn services_killed_at_random_moments_lose_nothing() {
             stuck.is_empty(),
             "seed {seed}: no tick was blocked or stopped: {stuck:?}"
         );
+        let removed = logs[at]
+            .iter()
+            .filter(|line| line.contains(r#""event":"stale lock removed""#))
+            .count();
+        assert!(
+            !folder.join(".git/index.lock").exists(),
+            "seed {seed}: no lock is left"
+        );
+        assert!(
+            removed <= dead_locks[at] && (dead_locks[at] == 0 || removed > 0),
+            "seed {seed}: {} dead locks, {removed} removals logged",
+            dead_locks[at]
+        );
         eprintln!(
-            "{}: {kills} kills in all, {} outcome changes",
+            "{}: {kills} kills in all, {} dead locks, {} outcome changes",
             machines[at].0,
+            dead_locks[at],
             changes.len()
         );
     }
