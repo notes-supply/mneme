@@ -1672,6 +1672,7 @@ dependencies = [
  "axum",
  "clap",
  "comrak",
+ "fastrand",
  "flate2",
  "futures-util",
  "gix",

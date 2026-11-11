@@ -38,6 +38,7 @@ unimplemented = "deny"
 dbg_macro = "deny"
 
 [dev-dependencies]
+fastrand = "2.5.0"
 flate2 = "1.1.11"
 tempfile = "3.27.0"
 ureq = { version = "3.5.1", default-features = false }

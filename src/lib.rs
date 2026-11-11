@@ -9,6 +9,7 @@ use serde_json::json;
 
 pub mod api;
 pub mod auth;
+pub mod autosave;
 pub mod git_http;
 pub mod hook;
 pub mod index;
