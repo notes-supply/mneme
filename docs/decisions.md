@@ -32,3 +32,4 @@ Choices made while building Mneme that the design brief left open or that differ
 - **Only the three smart HTTP routes exist.** The dumb protocol is not served.
 - **A body over 64 MiB** is refused with 413 when its length is declared, and cut off when it is streamed.
 - **The push check also refuses a deletion of `main`,** before `receive.denyDeletes` would, and compares `.git` without case, since clones on macOS and Windows read `.GIT` as `.git`.
+- **Git checks every pushed object** (`receive.fsckObjects`). It refuses tree entries named `.` or `..`, and every name that HFS+ or NTFS reads as `.git` (`.GIT`, `git~1`), before the push check runs. The push check's own `.git` comparison stays as a second line.

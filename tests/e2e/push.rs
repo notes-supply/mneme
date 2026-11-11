@@ -45,6 +45,7 @@ fn clone_commit_push_and_read_the_change() {
     let config = |key: &str| work.git.ok(repo, &["--git-dir", ".", "config", key]);
     assert_eq!(config("receive.denyNonFastForwards").trim(), "true");
     assert_eq!(config("receive.denyDeletes").trim(), "true");
+    assert_eq!(config("receive.fsckObjects").trim(), "true");
     assert_eq!(config("http.receivepack").trim(), "true");
     let hook = std::fs::metadata(repo.join("hooks/pre-receive")).unwrap();
     assert_eq!(hook.permissions().mode() & 0o111, 0o111);
@@ -157,9 +158,9 @@ fn a_submodule_is_refused() {
     );
 }
 
-#[test]
-fn a_path_named_dot_git_is_refused() {
-    let (server, work) = wiki();
+/// Makes `main` a commit whose root tree has one entry, a folder named `name` holding a page.
+/// Stock `git mktree` writes such a tree whatever the name is.
+fn commit_with_folder_named(work: &Work, name: &str) {
     let blob = work.ok(&["hash-object", "-w", "index.md"]);
     let inner = work.git_stdin(
         &["mktree", "-z"],
@@ -167,7 +168,7 @@ fn a_path_named_dot_git_is_refused() {
     );
     let outer = work.git_stdin(
         &["mktree", "-z"],
-        &format!("040000 tree {}\t.git\0", inner.trim()),
+        &format!("040000 tree {}\t{name}\0", inner.trim()),
     );
     let commit = work.ok(&[
         "commit-tree",
@@ -175,15 +176,27 @@ fn a_path_named_dot_git_is_refused() {
         "-p",
         "HEAD",
         "-m",
-        "Hide a .git",
+        &format!("Hide a folder named {name}"),
     ]);
     work.ok(&["update-ref", "refs/heads/main", commit.trim()]);
-    assert_refused(
-        &server,
-        &work,
-        &["origin", "main"],
-        "has a path named .git: .git",
-    );
+}
+
+#[test]
+fn a_path_named_dot_git_is_refused() {
+    for name in [".git", ".GIT", "git~1"] {
+        let (server, work) = wiki();
+        commit_with_folder_named(&work, name);
+        assert_refused(&server, &work, &["origin", "main"], "hasDotgit");
+    }
+}
+
+#[test]
+fn a_tree_with_a_dot_or_dotdot_entry_is_refused() {
+    for (name, reason) in [("..", "hasDotdot"), (".", "hasDot:")] {
+        let (server, work) = wiki();
+        commit_with_folder_named(&work, name);
+        assert_refused(&server, &work, &["origin", "main"], reason);
+    }
 }
 
 #[test]

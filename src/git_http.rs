@@ -71,6 +71,7 @@ pub fn prepare(repo: &Path) -> Result<()> {
     for (key, value) in [
         ("receive.denyNonFastForwards", "true"),
         ("receive.denyDeletes", "true"),
+        ("receive.fsckObjects", "true"),
         ("http.receivepack", "true"),
     ] {
         let mut config = StdCommand::new("git");
