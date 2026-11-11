@@ -88,7 +88,8 @@ struct Tally {
     pulled: usize,
     pushed: usize,
     offline: usize,
-    same_line_pairs: usize,
+    /// Same line, same new page, edit against delete, delete against edit, rename against rename.
+    overlaps_on_purpose: [usize; 5],
     hand_commits: usize,
     hand_merges: usize,
     commits_made: usize,
@@ -104,7 +105,13 @@ impl Tally {
         self.pulled += other.pulled;
         self.pushed += other.pushed;
         self.offline += other.offline;
-        self.same_line_pairs += other.same_line_pairs;
+        for (total, more) in self
+            .overlaps_on_purpose
+            .iter_mut()
+            .zip(other.overlaps_on_purpose)
+        {
+            *total += more;
+        }
         self.hand_commits += other.hand_commits;
         self.hand_merges += other.hand_merges;
         self.commits_made += other.commits_made;
@@ -393,7 +400,7 @@ impl Sim {
             67..71 => self.delete(clone),
             71..75 => self.rename(clone, false),
             75..79 => self.rename(clone, true),
-            79..84 => self.same_line_edits(clone),
+            79..84 => self.overlap_on_purpose(clone),
             84..86 => self.delete_on_two(clone),
             86..90 => self.hand_commit(clone),
             90..94 => self.hand_pull(clone),
@@ -544,30 +551,86 @@ impl Sim {
         }
     }
 
-    /// Two clones that both have a page as the server has it change the same line of it, and
-    /// both save before either syncs. Whichever integrates second overlaps, keeps its own
-    /// text and says so.
-    fn same_line_edits(&mut self, first: usize) {
+    /// Two clones that both have a page as the server has it change it in ways that cannot
+    /// both stand, and both save before either syncs. The second to integrate keeps its own
+    /// side, says so, and pushes.
+    fn overlap_on_purpose(&mut self, first: usize) {
         let second = self.other(first);
         if !self.clones[first].online || !self.clones[second].online {
             return;
         }
-        let Some(path) = self.shared_page(first, second, true) else {
-            return;
+        let kind = self.rng.usize(..5);
+        let path = if kind == 1 {
+            let token = self.token(first);
+            format!("shared-{token}.md")
+        } else {
+            match self.shared_page(first, second, true) {
+                Some(path) => path,
+                None => return,
+            }
         };
-        let lines = self.read(first, &path).lines().count();
-        let line = self.rng.usize(..lines.max(1));
-        self.replace_line(first, &path, Some(line));
-        let saved = self.replace_line(second, &path, Some(line));
+        let kept = match kind {
+            0 => {
+                let line = self
+                    .rng
+                    .usize(..self.read(first, &path).lines().count().max(1));
+                self.replace_line(first, &path, Some(line));
+                Some((path.clone(), self.replace_line(second, &path, Some(line))))
+            }
+            1 => {
+                for clone in [first, second] {
+                    let token = self.token(clone);
+                    self.write(clone, &path, &format!("# Shared\n\nwritten by {token}\n"));
+                }
+                self.note(second, &format!("both create {path}"));
+                Some((path.clone(), self.read(second, &path)))
+            }
+            2 => {
+                self.replace_line(first, &path, None);
+                fs::remove_file(self.clones[second].path().join(&path)).unwrap();
+                self.note(
+                    second,
+                    &format!("delete {path}, which the other clone edits"),
+                );
+                None
+            }
+            3 => {
+                fs::remove_file(self.clones[first].path().join(&path)).unwrap();
+                self.note(
+                    first,
+                    &format!("delete {path}, which the other clone edits"),
+                );
+                Some((path.clone(), self.replace_line(second, &path, None)))
+            }
+            _ => {
+                let mut targets = Vec::new();
+                for clone in [first, second] {
+                    let token = self.token(clone);
+                    let to = format!("moved-{token}.md");
+                    fs::rename(
+                        self.clones[clone].path().join(&path),
+                        self.clones[clone].path().join(&to),
+                    )
+                    .unwrap();
+                    self.note(
+                        clone,
+                        &format!("rename {path} to {to}, as the other clone does"),
+                    );
+                    targets.push(to);
+                }
+                let to = targets.pop().unwrap();
+                Some((to.clone(), self.read(second, &to)))
+            }
+        };
         self.advance(QUIET + Duration::from_secs(1));
-        self.tally.same_line_pairs += 1;
+        self.tally.overlaps_on_purpose[kind] += 1;
         self.tick_now(first);
         let outcome = self.tick_now(second);
         let seed = self.seed;
         assert_eq!(
             outcome,
             Outcome::Pushed,
-            "seed {seed}: the second clone pushes its overlapping save"
+            "seed {seed}: the second clone pushes its side"
         );
         let head = self.server_head();
         let commit = Commit::read(&self.git, self.server.repo(), &head);
@@ -577,11 +640,18 @@ impl Sim {
             "seed {seed}: {head} has one Overlap trailer: {}",
             commit.message
         );
-        assert_eq!(
-            self.server_text(&head, &path).as_deref(),
-            Some(saved.as_bytes()),
-            "seed {seed}: {path} has the text the second clone saved"
-        );
+        match kept {
+            Some((path, text)) => assert_eq!(
+                self.server_text(&head, &path).as_deref(),
+                Some(text.as_bytes()),
+                "seed {seed}: {path} has the text the second clone saved"
+            ),
+            None => assert_eq!(
+                self.server_text(&head, &path),
+                None,
+                "seed {seed}: {path} stays deleted, as the second clone saved it"
+            ),
+        }
     }
 
     /// Two clones delete the same page before either syncs, so the second deletion finds the
