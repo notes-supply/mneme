@@ -115,6 +115,16 @@ fn server_pages(git: &Isolation, server: &Server, head: &str) -> Option<BTreeMap
     )
 }
 
+/// Whether a blocked tick only waited for a Git command that was still running. A killed
+/// service's Git commands run on to their end, so the service that replaces it can meet one
+/// holding `index.lock`. That lock is seconds old, and the next tick goes on.
+fn waits_for_a_live_git(detail: &str) -> bool {
+    detail
+        .strip_prefix("index.lock is ")
+        .and_then(|rest| rest.split(' ').next()?.parse::<u64>().ok())
+        .is_some_and(|age| age < 10)
+}
+
 fn outcomes(log: &[String]) -> Vec<(String, String)> {
     log.iter()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -335,10 +345,16 @@ fn services_killed_at_random_moments_lose_nothing() {
         let stuck: Vec<_> = changes
             .iter()
             .filter(|(outcome, _)| outcome == "stopped" || outcome == "blocked")
+            .filter(|(_, detail)| !waits_for_a_live_git(detail))
             .collect();
         assert!(
             stuck.is_empty(),
             "seed {seed}: no tick was blocked or stopped: {stuck:?}"
+        );
+        assert_ne!(
+            changes.last().map(|(outcome, _)| outcome.as_str()),
+            Some("blocked"),
+            "seed {seed}: the service does not end blocked"
         );
         let removed = logs[at]
             .iter()
