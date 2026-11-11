@@ -1,0 +1,66 @@
+name: Release
+# Called by CI on a push to main once the gate passed on that commit. This file's path on
+# refs/heads/main is the keyless signing identity that Flux on Apollo verifies.
+on:
+  workflow_call:
+permissions: {}
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read # check out the commit and read main's head
+      packages: write # push the image and the manifests artifact
+      id-token: write # sign keyless as this workflow
+    # One release at a time, never cancelled halfway.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+      IMAGE: ghcr.io/notes-supply/mneme
+      ARTIFACT: oci://ghcr.io/notes-supply/manifests/mneme
+    steps:
+      # A rerun of an older run must not move main back to its commit.
+      - name: Check that this commit is still main
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          if [ "$head" = "$GITHUB_SHA" ]; then
+            echo "publish=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "main is at $head now, and that commit's own run publishes it"
+          fi
+      - if: steps.current.outputs.publish
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: steps.current.outputs.publish
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          install_args: aqua:fluxcd/flux2 aqua:sigstore/cosign aqua:kubernetes/kubectl
+          cache: false
+      - if: steps.current.outputs.publish
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image
+      - if: steps.current.outputs.publish
+        name: Push the image
+        id: image
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          auth="$HOME/.docker/config.json"
+          mkdir -p "$(dirname "$auth")"
+          printf '%s' "$GITHUB_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin --authfile "$auth"
+          podman load --quiet --input image.tar
+          podman push --authfile "$auth" --digestfile digest localhost/mneme:release "$IMAGE:$GITHUB_SHA"
+          echo "ref=$IMAGE@$(cat digest)" >>"$GITHUB_OUTPUT"
+      - if: steps.current.outputs.publish
+        name: Publish and sign the manifests
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+        run: scripts/release.sh "$IMAGE_REF" "$ARTIFACT"

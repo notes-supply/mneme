@@ -43,3 +43,26 @@ jobs:
         with:
           install_args: aqua:aquasecurity/trivy
       - run: mise run image
+        env:
+          MNEME_IMAGE: localhost/mneme:release
+      # The release job publishes this exact build.
+      - run: podman save --format oci-archive --output image.tar localhost/mneme:release
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image
+          path: image.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  # A push to main deploys once the gate passed on that commit: release.yml publishes the image
+  # and the signed manifests that Flux on Apollo follows.
+  release:
+    name: release
+    needs: [gate, image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read # check out the commit and read main's head
+      packages: write # push the image and the manifests artifact
+      id-token: write # sign keyless as this workflow
+    # actionlint 1.7.12 rejects the $/ form zizmor suggests.
+    uses: ./.github/workflows/release.yml # zizmor: ignore[self-repository]

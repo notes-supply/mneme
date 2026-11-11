@@ -24,6 +24,26 @@ url = "https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.7
 url_api = "https://api.github.com/repos/aquasecurity/trivy/releases/assets/713401165"
 provenance = "cosign"
 
+[[tools."aqua:fluxcd/flux2"]]
+version = "2.8.2"
+backend = "aqua:fluxcd/flux2"
+specifiers = ["2.8.2"]
+
+[tools."aqua:fluxcd/flux2"."platforms.linux-x64"]
+checksum = "sha256:711a0ac3d1ea15e957c2775af11ddc48a505b6adaa8fa5db5a65355ee6f49cde"
+checksum_source = "mise-versions"
+url = "https://github.com/fluxcd/flux2/releases/download/v2.8.2/flux_2.8.2_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/fluxcd/flux2/releases/assets/372401431"
+
+[[tools."aqua:kubernetes/kubectl"]]
+version = "1.36.3"
+backend = "aqua:kubernetes/kubectl"
+specifiers = ["1.36.3"]
+
+[tools."aqua:kubernetes/kubectl"."platforms.linux-x64"]
+checksum = "sha256:ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336"
+url = "https://dl.k8s.io/v1.36.3/bin/linux/amd64/kubectl"
+
 [[tools."aqua:nextest-rs/nextest/cargo-nextest"]]
 version = "0.9.150"
 backend = "aqua:nextest-rs/nextest/cargo-nextest"
@@ -45,6 +65,17 @@ checksum = "sha256:8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a
 url = "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz"
 url_api = "https://api.github.com/repos/rhysd/actionlint/releases/assets/384924896"
 provenance = "github-attestations"
+
+[[tools."aqua:sigstore/cosign"]]
+version = "3.1.4"
+backend = "aqua:sigstore/cosign"
+specifiers = ["3.1.4"]
+
+[tools."aqua:sigstore/cosign"."platforms.linux-x64"]
+checksum = "sha256:424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa"
+url = "https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64"
+url_api = "https://api.github.com/repos/sigstore/cosign/releases/assets/660069428"
+provenance = "cosign"
 
 [[tools."aqua:zizmorcore/zizmor"]]
 version = "1.30.1"

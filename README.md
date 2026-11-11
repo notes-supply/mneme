@@ -17,7 +17,7 @@ The tokens file maps each machine's name to the SHA-256 of its token. The server
 
 The reading API is described in [docs/api.md](docs/api.md).
 
-`mise run image` builds the server's image from the `Containerfile`, a static `mneme` beside Alpine's Git, and checks it with a real clone and push and a Trivy scan. It runs as UID 65532 on a read-only root, keeps the repository on a volume at `/data` and reads the tokens from `/etc/mneme/tokens.json`. CI builds it too and pushes it nowhere.
+`mise run image` builds the server's image from the `Containerfile`, a static `mneme` beside Alpine's Git, and checks it with a real clone and push and a Trivy scan. It runs as UID 65532 on a read-only root, keeps the repository on a volume at `/data` and reads the tokens from `/etc/mneme/tokens.json`. CI builds it the same way on every push and publishes it only from `main` (see Deploy).
 
 ## Autosave
 
@@ -29,6 +29,14 @@ mneme autosave run  --folder ~/wiki --server https://host --token-file ~/.config
 ```
 
 `init` clones into a missing or empty folder, or checks an existing clone. Both need Git 2.45 or newer. A folder takes one service: a second `run` on it exits. [deploy/mneme-autosave.service](deploy/mneme-autosave.service) runs the service as a systemd user unit. It reports its state to the server, which lists every machine on `/v1/machines`.
+
+## Deploy
+
+A push to `main` deploys Mneme to Apollo once the gate passes on that commit. CI's release job pushes the image built by the `image` job to `ghcr.io/notes-supply/mneme` by digest, and `scripts/release.sh` packs `deploy/` with that digest as one OCI artifact, signs it keyless as `.github/workflows/release.yml` on `main`, and points its `main` tag at it. Flux on Apollo verifies that signature and applies `deploy/` in namespace `atrium`. `deploy/` holds only what a release may change: the Deployment. The cluster repository owns the Service, Ingress, network policy, the tokens Secret and the repository's volume, which the Deployment mounts by name.
+
+Roll back a bad release with a revert commit on `main`; it deploys the same way.
+A release whose pod never gets ready leaves Mneme down, since one pod holds the volume: Flux applies the revert once that release's 5-minute health check has timed out.
+Never retag the artifact by hand: Flux accepts only what the release workflow signed on `main`.
 
 ## Check it
 
