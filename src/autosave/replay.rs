@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use super::git::Git;
 
 /// The tree of a commit with no parent is compared with the empty tree.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+pub(super) const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// For each path that did not merge, the replayed commit's mode and blob, or `None` when that
 /// commit has no file there.

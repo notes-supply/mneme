@@ -27,6 +27,11 @@ use save::{Left, Save};
 
 /// The longest detail a report carries, under the server's limit.
 const MAX_DETAIL: usize = 1000;
+/// How many commits may land on `main` while the service moves the folder, before it leaves
+/// the move to the next tick.
+const MOVES: usize = 4;
+/// What the reflog of `main` says of a move.
+const MOVE_MESSAGE: &str = "autosave: move to the server's main";
 
 /// A machine's token. Its `Debug` leaves the token out.
 #[derive(Clone)]
@@ -58,6 +63,8 @@ pub struct Config {
     /// command that holds it keeps writing it, and none in a wiki folder writes the index for
     /// minutes.
     pub stale_lock: Duration,
+    /// The Git program, `git` on `PATH` unless a test puts a wrapper in its place.
+    pub git: PathBuf,
 }
 
 /// What a tick did, or why it did nothing.
@@ -146,6 +153,16 @@ struct Seen {
     head: Option<String>,
     /// What the service leaves in the folder, by path.
     left: Vec<Left>,
+}
+
+/// What came of moving the folder.
+enum Move {
+    /// `main` and the folder are at this commit.
+    Done(String),
+    /// An edit in the folder is in the way, so nothing moved.
+    Waiting,
+    /// Commits kept landing on `main` while the folder moved, for this reason.
+    Blocked(String),
 }
 
 enum Push {
@@ -445,25 +462,22 @@ impl Autosave {
         let origin = self.origin()?;
         let ahead = match self.shape(head.as_deref(), origin.as_deref())? {
             Shape::Same => false,
-            Shape::Behind => {
-                let Some(target) = &origin else {
+            Shape::Ahead => true,
+            shape => {
+                let target = self.target(shape, head.as_deref(), origin.as_deref(), pending)?;
+                let Some(target) = target else {
                     return Ok(None);
                 };
-                if !self.fast_forward(target)? {
-                    return Ok(None);
+                match self.advance(head.as_deref(), target, origin.as_deref())? {
+                    Move::Done(moved) => {
+                        *progress = (*progress).max(Progress::Pulled);
+                        let ahead = Some(&moved) != origin.as_ref();
+                        *head = Some(moved);
+                        ahead
+                    }
+                    Move::Waiting => return Ok(None),
+                    Move::Blocked(reason) => return Ok(Some(reason)),
                 }
-                head.clone_from(&origin);
-                *progress = (*progress).max(Progress::Pulled);
-                false
-            }
-            Shape::Ahead => true,
-            Shape::Diverged(commits) => {
-                if pending || !self.integrate(head.as_deref(), origin.as_deref(), &commits)? {
-                    return Ok(None);
-                }
-                *head = self.head()?;
-                *progress = (*progress).max(Progress::Pulled);
-                *head != origin
             }
         };
         let Some(local) = head.clone().filter(|_| ahead) else {
@@ -495,45 +509,118 @@ impl Autosave {
         })
     }
 
-    /// Takes the server's commits. Git refuses when that would overwrite a file with unsaved
-    /// edits, which is right: they are saved first, and the next tick replays them.
-    fn fast_forward(&self, origin: &str) -> Result<bool> {
-        self.refresh_index()?;
-        let run = self.git.run(&["merge", "--quiet", "--ff-only", origin])?;
-        self.moved_or_waiting(&run, "merge --ff-only")
-    }
-
-    /// Replays the local commits onto the server's `main` and moves the folder there.
-    fn integrate(
+    /// Where the folder moves to: the server's main when local history is only behind it, or
+    /// the local commits replayed onto it. `None` while unsaved edits wait, which a replay
+    /// would leave behind, or when a commit landed during the replay, which the next tick
+    /// replays with the rest.
+    fn target(
         &self,
+        shape: Shape,
         head: Option<&str>,
         origin: Option<&str>,
-        commits: &[Local],
-    ) -> Result<bool> {
-        let Some(head) = head else {
-            return Ok(false);
-        };
-        let Some(tip) = replay::replay(&self.git, origin, commits)?.tip else {
-            return Ok(false);
-        };
-        if self.head()?.as_deref() != Some(head) {
-            return Ok(false);
+        pending: bool,
+    ) -> Result<Option<String>> {
+        match shape {
+            Shape::Behind => Ok(origin.map(str::to_owned)),
+            Shape::Diverged(commits) => {
+                let Some(head) = head.filter(|_| !pending) else {
+                    return Ok(None);
+                };
+                let Some(tip) = replay::replay(&self.git, origin, &commits)?.tip else {
+                    return Ok(None);
+                };
+                Ok((self.head()?.as_deref() == Some(head)).then_some(tip))
+            }
+            Shape::Same | Shape::Ahead => Ok(None),
         }
-        self.refresh_index()?;
-        let run = self.git.run(&["reset", "--quiet", "--keep", &tip])?;
-        self.moved_or_waiting(&run, "reset --keep")
     }
 
-    /// Whether a checkout moved the folder. When it did not because the folder has edits in
-    /// the way, the service waits for them to be saved. Any other failure is an error.
-    fn moved_or_waiting(&self, run: &git::Run, what: &str) -> Result<bool> {
-        if run.success {
-            return Ok(true);
+    /// Moves the folder and then `main` from `head` to `target`. The folder moves with Git's
+    /// two-way merge from `head`, `git read-tree -m -u`, the rule `git reset --keep` uses: it
+    /// keeps every edit and staged change, and refuses rather than overwrite one. `main` then
+    /// moves only if it is still `head`, with `git update-ref`. A commit that landed on `main`
+    /// in between, such as an agent's hand commit, makes that fail. It is replayed onto
+    /// `target` and the move tried again from there, so no commit is ever moved off `main`.
+    fn advance(&self, head: Option<&str>, target: String, origin: Option<&str>) -> Result<Move> {
+        let mut from = head.map(str::to_owned);
+        let mut expected = from.clone();
+        let mut target = target;
+        for round in 0..MOVES {
+            self.refresh_index()?;
+            let base = from.as_deref().unwrap_or(replay::EMPTY_TREE);
+            let run = self.git.run(&["read-tree", "-m", "-u", base, &target])?;
+            if !run.success {
+                if round > 0 {
+                    let landed = expected.as_deref().unwrap_or_default();
+                    return Ok(Move::Blocked(format!(
+                        "commit {landed} landed on main as the folder moved, and then git \
+                         read-tree failed: {}",
+                        run.error()
+                    )));
+                }
+                if Folder::read(&self.git)?.clean() {
+                    bail!("git read-tree -m -u failed: {}", run.error());
+                }
+                return Ok(Move::Waiting);
+            }
+            let old = expected.as_deref().unwrap_or(git::NO_OBJECT);
+            let args = [
+                "update-ref",
+                "-m",
+                MOVE_MESSAGE,
+                "refs/heads/main",
+                &target,
+                old,
+            ];
+            let swap = self.git.run(&args)?;
+            if swap.success {
+                return Ok(Move::Done(target));
+            }
+            let now = self.head()?;
+            let Some(landed) = now.filter(|now| Some(now) != expected.as_ref()) else {
+                bail!("git update-ref failed: {}", swap.error());
+            };
+            let commits = self.landed(&landed, expected.as_deref(), origin)?;
+            let next = replay::replay(&self.git, Some(&target), &commits)?
+                .tip
+                .unwrap_or_else(|| target.clone());
+            from = Some(std::mem::replace(&mut target, next));
+            expected = Some(landed);
         }
-        if Folder::read(&self.git)?.clean() {
-            bail!("git {what} failed: {}", run.error());
-        }
-        Ok(false)
+        Ok(Move::Blocked(format!(
+            "commits kept landing on main as the folder moved; the last was {}",
+            expected.unwrap_or_default()
+        )))
+    }
+
+    /// The commits on `main` at `now` that are neither in `before` nor on the server, oldest
+    /// first. Merges are left out, as when local history is replayed.
+    fn landed(&self, now: &str, before: Option<&str>, origin: Option<&str>) -> Result<Vec<Local>> {
+        let excluded: Vec<String> = [before, origin]
+            .into_iter()
+            .flatten()
+            .map(|id| format!("^{id}"))
+            .collect();
+        let mut args = vec![
+            "rev-list",
+            "--topo-order",
+            "--reverse",
+            "--parents",
+            "--no-merges",
+        ];
+        args.push(now);
+        args.extend(excluded.iter().map(String::as_str));
+        let listing = self.git.ok(&args)?;
+        Ok(String::from_utf8_lossy(&listing)
+            .lines()
+            .map(|line| {
+                let mut ids = line.split(' ').map(str::to_owned);
+                Local {
+                    id: ids.next().unwrap_or_default(),
+                    parent: ids.next(),
+                }
+            })
+            .collect())
     }
 
     /// Pushes `head` over `origin`, the server's main as the last fetch saw it. A push the

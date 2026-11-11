@@ -12,6 +12,9 @@ use anyhow::{Context, Result, bail};
 
 use super::Config;
 
+/// The id Git reads as no object at all.
+pub(super) const NO_OBJECT: &str = "0000000000000000000000000000000000000000";
+
 /// One `git` command's result.
 pub(super) struct Run {
     pub success: bool,
@@ -34,6 +37,7 @@ impl Run {
 }
 
 pub(super) struct Git {
+    program: PathBuf,
     folder: PathBuf,
     /// The repository inside the folder, `.git`.
     repository: PathBuf,
@@ -87,6 +91,7 @@ impl Git {
             .map(|(key, value)| (key.into(), value.into())),
         );
         Self {
+            program: config.git.clone(),
             folder,
             repository,
             server: config.server.clone(),
@@ -126,7 +131,7 @@ impl Git {
     /// `git` with every variable and setting, `extra` settings after them, and none of the
     /// caller's own `GIT_` variables.
     fn command(&self, extra: &[(String, String)]) -> Command {
-        let mut command = Command::new("git");
+        let mut command = Command::new(&self.program);
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("GIT_") {
                 command.env_remove(key);

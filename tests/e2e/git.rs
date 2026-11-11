@@ -3,6 +3,7 @@
 
 use std::cell::Cell;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -10,6 +11,28 @@ use tempfile::TempDir;
 
 /// The author time of the first fixture commit: 2026-09-01T00:00:00Z.
 pub const START: i64 = 1_788_220_800;
+
+/// A Git program for the autosave service that runs `.git/mneme-test-race` once, right before the
+/// first command whose words include those in `.git/mneme-test-race.before`, and then the command
+/// itself. The script is renamed `mneme-test-race.ran` as it starts.
+const RACY_GIT: &str = r#"#!/bin/sh
+race="$GIT_DIR/mneme-test-race"
+if [ -n "$GIT_DIR" ] && [ -f "$race" ]; then
+  before=$(cat "$race.before")
+  case " $* " in
+    *" $before "*) mv "$race" "$race.ran" && sh "$race.ran" ;;
+  esac
+fi
+exec git "$@"
+"#;
+
+/// Writes [`RACY_GIT`] into `dir` and returns its path.
+pub fn racy_git(dir: &Path) -> PathBuf {
+    let program = dir.join("racy-git");
+    fs::write(&program, RACY_GIT).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    program
+}
 
 /// Empty configuration for every `git` the tests run. The machine's global gitignore would
 /// otherwise hide files such as `AGENTS.md`.

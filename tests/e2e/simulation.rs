@@ -19,7 +19,7 @@ use mneme::rules::{MAX_FILE, MAX_PAGE};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use crate::git::Isolation;
+use crate::git::{self, Isolation};
 use crate::server::{MACHINES, Server};
 
 const QUIET: Duration = Duration::from_secs(15);
@@ -31,6 +31,8 @@ const START: u64 = 1_800_000_000;
 const UNREACHABLE: &str = "http://127.0.0.1:9/git/wiki.git";
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const GATE_SEEDS: u64 = 128;
+/// The body of a hand commit made to land as a service moves the folder.
+const LANDED_AS_IT_MOVED: &str = "An agent committed this as the service moved the folder.";
 const GATE_STEPS: usize = 80;
 
 fn env_number<T: std::str::FromStr>(name: &str) -> Option<T> {
@@ -96,6 +98,7 @@ struct Tally {
     hand_commits: usize,
     hand_merges: usize,
     dead_locks: usize,
+    hand_commits_as_the_folder_moved: usize,
     bad_files: usize,
     bad_files_fixed: usize,
     commits_made: usize,
@@ -121,6 +124,7 @@ impl Tally {
         self.hand_commits += other.hand_commits;
         self.hand_merges += other.hand_merges;
         self.dead_locks += other.dead_locks;
+        self.hand_commits_as_the_folder_moved += other.hand_commits_as_the_folder_moved;
         self.bad_files += other.bad_files;
         self.bad_files_fixed += other.bad_files_fixed;
         self.commits_made += other.commits_made;
@@ -281,6 +285,11 @@ struct Sim {
     rng: fastrand::Rng,
     server: Server,
     git: Isolation,
+    /// The Git program the service of one clone runs, which can make a hand commit land as it
+    /// moves the folder. Running it costs a shell for every Git command, so only that clone has
+    /// it, a different one from seed to seed.
+    racy: (TempDir, std::path::PathBuf),
+    racing: usize,
     clones: Vec<Clone>,
     now: SystemTime,
     counter: u64,
@@ -298,11 +307,15 @@ impl Sim {
         let git = Isolation::new();
         let server = Server::empty(&git);
         let now = UNIX_EPOCH + Duration::from_secs(START);
+        let racy = TempDir::new().unwrap();
+        let program = git::racy_git(racy.path());
         let mut sim = Self {
             seed,
             rng: fastrand::Rng::with_seed(seed),
             server,
             git,
+            racy: (racy, program),
+            racing: usize::try_from(seed % 3).unwrap(),
             clones: Vec::new(),
             now,
             counter: 0,
@@ -313,8 +326,8 @@ impl Sim {
             tally: Tally::default(),
         };
         sim.start_pages();
-        for (machine, token) in MACHINES {
-            let clone = sim.clone_as(machine, token);
+        for (index, (machine, token)) in MACHINES.into_iter().enumerate() {
+            let clone = sim.clone_as(machine, token, index == sim.racing);
             sim.clones.push(clone);
         }
         sim
@@ -352,7 +365,7 @@ impl Sim {
             .to_owned();
     }
 
-    fn clone_as(&self, machine: &'static str, token: &'static str) -> Clone {
+    fn clone_as(&self, machine: &'static str, token: &'static str, racing: bool) -> Clone {
         let dir = TempDir::new().unwrap();
         let git = Isolation::new();
         let header = format!("http.extraHeader=Authorization: Bearer {token}");
@@ -368,6 +381,11 @@ impl Sim {
             fetch_every: FETCH_EVERY,
             report_every: Duration::from_secs(300),
             stale_lock: STALE_LOCK,
+            git: if racing {
+                self.racy.1.clone()
+            } else {
+                "git".into()
+            },
         });
         let mut clone = Clone {
             machine,
@@ -413,7 +431,8 @@ impl Sim {
     fn step(&mut self) {
         let clone = self.rng.usize(..self.clones.len());
         match self.rng.u32(..100) {
-            0..40 => self.tick(clone),
+            0..38 => self.tick(clone),
+            38..40 => self.hand_commit_as_the_folder_moves(),
             40..50 => self.create(clone),
             50..62 => self.edit(clone),
             62..67 => self.append(clone),
@@ -453,6 +472,12 @@ impl Sim {
             _ => {}
         }
         self.outcomes.push((clone, outcome.clone()));
+        let ran = self.clones[clone].path().join(".git/mneme-test-race.ran");
+        if ran.exists() {
+            fs::remove_file(ran).unwrap();
+            self.note(clone, "the hand commit landed as the folder moved");
+            self.tally.hand_commits_as_the_folder_moved += 1;
+        }
         self.read_reflog(clone);
         outcome
     }
@@ -654,8 +679,7 @@ impl Sim {
             Outcome::Pushed,
             "seed {seed}: the second clone pushes its side"
         );
-        let head = self.server_head();
-        let commit = Commit::read(&self.git, self.server.repo(), &head);
+        let (head, commit) = self.saved_head();
         assert_eq!(
             commit.overlaps(),
             1,
@@ -749,6 +773,34 @@ impl Sim {
         self.note(clone, &format!("hand commit {token}"));
         self.tally.hand_commits += 1;
         self.read_reflog(clone);
+    }
+
+    /// Makes an agent's hand commit of a new page land in the middle of the racing clone's next
+    /// move of the folder, right before it moves the folder or right before it moves `main`.
+    fn hand_commit_as_the_folder_moves(&mut self) {
+        let clone = self.racing;
+        let race = self.clones[clone].path().join(".git/mneme-test-race");
+        if race.exists() {
+            return;
+        }
+        let token = self.token(clone);
+        let before = if self.rng.bool() {
+            "read-tree -m"
+        } else {
+            "update-ref"
+        };
+        let machine = self.clones[clone].machine;
+        let script = format!(
+            "export GIT_AUTHOR_NAME='Agent on {machine}' GIT_AUTHOR_EMAIL=agent@example.invalid \\
+             GIT_AUTHOR_DATE='@{} +0000'\n\
+             printf '# Page {token}\\n\\ntext {token}\\n' > \"$GIT_WORK_TREE/race-{token}.md\"\n\
+             git add -- race-{token}.md && git commit -q -m 'Hand edit {token}' \\
+             -m '{LANDED_AS_IT_MOVED}'\n",
+            secs(self.now)
+        );
+        fs::write(&race, script).unwrap();
+        fs::write(race.with_extension("before"), before).unwrap();
+        self.note(clone, &format!("a hand commit waits for the next {before}"));
     }
 
     /// `git pull` with a merge, as an agent might run it after committing its work. A pull
@@ -901,6 +953,18 @@ impl Sim {
         self.clones[clone].ok(&["config", "remote.origin.url", &url]);
         self.clones[clone].online = online;
         self.note(clone, if online { "online" } else { "offline" });
+    }
+
+    /// The server's head below the hand commits that landed as a folder moved, which a tick
+    /// replays on top of what it saved.
+    fn saved_head(&self) -> (String, Commit) {
+        let mut head = self.server_head();
+        let mut commit = Commit::read(&self.git, self.server.repo(), &head);
+        while commit.message.contains(LANDED_AS_IT_MOVED) {
+            head.clone_from(&commit.parents[0]);
+            commit = Commit::read(&self.git, self.server.repo(), &head);
+        }
+        (head, commit)
     }
 
     fn server_head(&self) -> String {

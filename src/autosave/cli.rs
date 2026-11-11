@@ -103,6 +103,7 @@ impl Target {
             fetch_every: timing(|run| run.fetch_seconds, 30),
             report_every: timing(|run| run.report_seconds, 300),
             stale_lock: timing(|run| run.stale_lock, 300),
+            git: PathBuf::from("git"),
         })
     }
 }

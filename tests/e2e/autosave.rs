@@ -1,7 +1,7 @@
 //! The autosave service's refusals, one at a time, with a fake clock.
 
 use std::fs::{self, File};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -10,7 +10,7 @@ use mneme::rules::{MAX_FILE, MAX_PAGE};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use crate::git::Isolation;
+use crate::git::{self, Isolation};
 use crate::server::{MACHINES, Server};
 
 const QUIET: Duration = Duration::from_secs(15);
@@ -24,10 +24,22 @@ struct Wiki {
     dir: TempDir,
     service: Autosave,
     now: SystemTime,
+    _racy: Option<TempDir>,
 }
 
 impl Wiki {
     fn new() -> Self {
+        Self::with_git("git".into(), None)
+    }
+
+    /// A clone whose service runs [`git::racy_git`].
+    fn racing() -> Self {
+        let dir = TempDir::new().unwrap();
+        let program = git::racy_git(dir.path());
+        Self::with_git(program, Some(dir))
+    }
+
+    fn with_git(program: PathBuf, racy: Option<TempDir>) -> Self {
         let git = Isolation::new();
         let server = Server::empty(&git);
         let (machine, token) = MACHINES[1];
@@ -59,6 +71,7 @@ impl Wiki {
             fetch_every: Duration::from_secs(30),
             report_every: Duration::from_secs(300),
             stale_lock: Duration::from_secs(300),
+            git: program,
         });
         Self {
             server,
@@ -66,7 +79,31 @@ impl Wiki {
             dir,
             service,
             now: UNIX_EPOCH + Duration::from_secs(START),
+            _racy: racy,
         }
+    }
+
+    /// Makes an agent's hand commit of a new page land right before the service's next Git
+    /// command that includes `before`.
+    fn race_before(&self, before: &str) {
+        let script = format!(
+            "export GIT_AUTHOR_NAME=Agent GIT_AUTHOR_EMAIL=agent@example.invalid \\
+             GIT_AUTHOR_DATE='@{START} +0000'\n\
+             printf '# Hand\\n\\nwritten during the move\\n' > \"$GIT_WORK_TREE/hand.md\"\n\
+             git add -- hand.md && git commit -q -m 'Hand edit during the move'\n"
+        );
+        self.run_before(before, &script);
+    }
+
+    /// Runs the shell `script` right before the service's next Git command that includes
+    /// `before`.
+    fn run_before(&self, before: &str, script: &str) {
+        fs::write(self.path().join(".git/mneme-test-race"), script).unwrap();
+        fs::write(self.path().join(".git/mneme-test-race.before"), before).unwrap();
+    }
+
+    fn raced(&self) -> bool {
+        self.path().join(".git/mneme-test-race.ran").exists()
     }
 
     fn path(&self) -> &Path {
@@ -165,6 +202,107 @@ impl Wiki {
             .map(|line| line["path"].as_str().unwrap().to_owned())
             .collect()
     }
+}
+
+/// An agent commits by hand right before the service moves the folder to the server's main,
+/// both when the service replays its commits and when it only takes the server's. The hand
+/// commit stays, with its author and message, and reaches the server.
+#[test]
+fn a_hand_commit_that_lands_as_the_folder_moves_is_kept() {
+    let points: [(&str, bool); 4] = [
+        ("read-tree -m", true),
+        ("update-ref", true),
+        ("read-tree -m", false),
+        ("update-ref", false),
+    ];
+    for (before, diverged) in points {
+        let mut wiki = Wiki::racing();
+        wiki.push_from_elsewhere("page-5.md", "# Page 5\n\nfrom elsewhere\n");
+        if diverged {
+            wiki.write("page-3.md", "# Page 3\n\nby hand before\n");
+            wiki.ok(&["commit", "-q", "-am", "Edit by hand"]);
+        }
+        wiki.race_before(before);
+        let outcome = wiki.tick();
+        assert!(wiki.raced(), "{before}: the race happened");
+        assert_eq!(outcome, Outcome::Pushed, "{before}");
+        assert_eq!(wiki.server_head(), wiki.head(), "{before}");
+        let subjects = wiki.ok(&["log", "--format=%an %s", "-4"]);
+        assert!(
+            subjects.contains("Agent Hand edit during the move"),
+            "{before}: the hand commit is on main: {subjects}"
+        );
+        assert_eq!(
+            fs::read_to_string(wiki.path().join("hand.md")).unwrap(),
+            "# Hand\n\nwritten during the move\n",
+            "{before}"
+        );
+        assert!(
+            wiki.ok(&["show", "HEAD:page-5.md"])
+                .contains("from elsewhere"),
+            "{before}"
+        );
+        if diverged {
+            assert!(
+                wiki.ok(&["show", "HEAD:page-3.md"])
+                    .contains("by hand before"),
+                "{before}"
+            );
+        }
+        assert_eq!(wiki.ok(&["status", "--porcelain"]), "", "{before}");
+    }
+}
+
+/// A service killed after it moved the folder and before it moved `main` leaves the server's
+/// changes as staged changes. The next tick saves them, its replay finds them already on the
+/// server and leaves that commit out, and nothing is lost on either side.
+#[test]
+fn a_folder_that_moved_without_its_main_loses_nothing() {
+    let mut wiki = Wiki::new();
+    wiki.push_from_elsewhere("page-5.md", "# Page 5\n\nfrom elsewhere\n");
+    wiki.write("page-3.md", "# Page 3\n\nby hand\n");
+    wiki.ok(&["commit", "-q", "-am", "Edit by hand"]);
+    let header = format!("http.extraHeader=Authorization: Bearer {}", MACHINES[1].1);
+    wiki.ok(&["-c", &header, "fetch", "-q", "origin"]);
+    let merged = wiki.ok(&[
+        "merge-tree",
+        "--write-tree",
+        "--merge-base=HEAD^",
+        "origin/main",
+        "HEAD",
+    ]);
+    let replayed = wiki.ok(&[
+        "commit-tree",
+        "-p",
+        "origin/main",
+        "-m",
+        "Edit by hand",
+        merged.trim(),
+    ]);
+    wiki.ok(&["read-tree", "-m", "-u", "HEAD", replayed.trim()]);
+    wiki.write("page-7.md", "# Page 7\n\nwritten after the kill\n");
+    for _ in 0..3 {
+        let outcome = wiki.tick();
+        assert!(
+            !matches!(outcome, Outcome::Blocked(_) | Outcome::Stopped(_)),
+            "{outcome:?}"
+        );
+    }
+    assert_eq!(wiki.server_head(), wiki.head());
+    assert_eq!(wiki.ok(&["status", "--porcelain"]), "");
+    for (page, text) in [
+        (3, "by hand"),
+        (5, "from elsewhere"),
+        (7, "written after the kill"),
+    ] {
+        let shown = wiki.ok(&["show", &format!("HEAD:page-{page}.md")]);
+        assert!(shown.contains(text), "page-{page}.md: {shown}");
+    }
+    assert_eq!(
+        wiki.ok(&["log", "--format=%s", "--", "page-5.md"]),
+        "Edit elsewhere\nStart\n",
+        "no commit of this clone touches page 5 again"
+    );
 }
 
 /// The report travels on Git's own HTTP path, so it trusts the same certificates as syncing
@@ -308,6 +446,28 @@ fn a_tracked_page_that_turns_bad_keeps_its_last_good_version() {
     assert_eq!(wiki.tick(), Outcome::Pushed);
     assert!(wiki.ok(&["show", "HEAD:page-2.md"]).contains("fixed"));
     assert_eq!(wiki.reported()["skipped"], skipped(&bad[1..]));
+}
+
+/// A page that turns into a symlink after the service looked at it and before it staged it is
+/// left out all the same.
+#[test]
+fn a_file_that_turns_bad_as_it_is_staged_is_left_out() {
+    let mut wiki = Wiki::racing();
+    wiki.write("page-2.md", "# Page 2\n\na good edit\n");
+    wiki.write("new.md", "# New\n\na page for now\n");
+    wiki.run_before(
+        "update-index --add",
+        "cd \"$GIT_WORK_TREE\" && rm new.md && ln -s page-1.md new.md\n",
+    );
+    assert_eq!(wiki.tick(), Outcome::Pushed);
+    assert!(wiki.raced(), "the file turned into a symlink");
+    assert!(!wiki.has("HEAD", "new.md"));
+    assert!(wiki.ok(&["show", "HEAD:page-2.md"]).contains("a good edit"));
+    assert_eq!(wiki.ok(&["ls-files", "new.md"]), "", "it is not staged");
+    assert_eq!(
+        wiki.reported()["skipped"],
+        skipped(&[("new.md".to_owned(), "a symlink")])
+    );
 }
 
 /// Staging a symlink by hand does not get it into the service's commit.

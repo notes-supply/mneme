@@ -8,10 +8,8 @@ use std::os::unix::ffi::OsStrExt;
 use anyhow::{Result, bail};
 
 use super::folder::{self, Change, Folder, Leave};
-use super::git::{self, Git};
+use super::git::{self, Git, NO_OBJECT};
 use crate::rules::{self, Entry};
-
-const NO_OBJECT: &str = "0000000000000000000000000000000000000000";
 
 pub(super) enum Save {
     Saved(String),
