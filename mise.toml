@@ -1,0 +1,41 @@
+min_version = { hard = "2026.11.5" }
+
+[settings]
+lockfile = true
+lockfile_platforms = ["linux-x64"]
+
+[tools]
+rust = { version = "nightly-2026-10-28", profile = "minimal", components = "rustfmt,clippy" }
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.150"
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
+"aqua:rhysd/actionlint" = "1.7.12"
+"aqua:zizmorcore/zizmor" = "1.30.1"
+
+[tasks.fmt]
+description = "Format the Rust sources"
+run = "cargo fmt --all"
+
+[tasks."check:fmt"]
+description = "Check formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks."check:clippy"]
+description = "Lint every target with warnings denied"
+run = "cargo clippy --locked --all-targets -- -D warnings"
+
+[tasks."check:test"]
+description = "Run the tests"
+wait_for = ["check:clippy"]
+run = "cargo nextest run --locked --no-tests=fail"
+
+[tasks."check:advisories"]
+description = "Fail on known vulnerabilities in the dependency tree"
+run = "cargo deny --locked {% if env.MISE_OFFLINE %}--offline {% endif %}check advisories"
+
+[tasks."check:workflows"]
+description = "Lint the CI workflow"
+run = ["actionlint", "zizmor --offline .github/workflows"]
+
+[tasks.gate]
+description = "Everything that proves the repository is good"
+depends = ["check:fmt", "check:clippy", "check:test", "check:advisories", "check:workflows"]

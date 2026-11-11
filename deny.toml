@@ -1,0 +1,3 @@
+# cargo-deny has no severity threshold, so every vulnerability fails the check.
+[advisories]
+unmaintained = "workspace"
