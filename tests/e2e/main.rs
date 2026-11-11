@@ -1,4 +1,5 @@
 mod api;
+mod autosave;
 mod cli;
 mod git;
 mod history;
