@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mneme
+  labels:
+    app.kubernetes.io/name: mneme
+  # Restarts Mneme when its tokens change, since it reads the tokens file at start.
+  annotations:
+    secrets.infisical.com/auto-reload: "true"
+spec:
+  replicas: 1
+  # One writer on a ReadWriteOnce volume: the old pod stops before the new one starts.
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mneme
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mneme
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      imagePullSecrets:
+        - name: ghcr-pull
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: amd64
+      containers:
+        - name: mneme
+          # The release names the image by digest; see scripts/release.sh.
+          image: mneme
+          ports:
+            - name: http
+              containerPort: 8080
+          # The index is rebuilt from the whole history at start.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 150
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: repository
+              mountPath: /data
+            - name: tokens
+              mountPath: /etc/mneme
+              readOnly: true
+      volumes:
+        - name: repository
+          persistentVolumeClaim:
+            claimName: mneme-repository
+        - name: tokens
+          secret:
+            secretName: mneme-tokens
+            defaultMode: 0440
+            items:
+              - key: tokens.json
+                path: tokens.json

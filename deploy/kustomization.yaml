@@ -1,0 +1,7 @@
+# What a Mneme release may change on Apollo. The cluster repository owns the rest of
+# namespace atrium: the Services, Ingress, network policy, the tokens Secret and the
+# repository's volume, which this Deployment mounts by name.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
