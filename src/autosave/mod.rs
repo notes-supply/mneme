@@ -115,6 +115,8 @@ struct State {
     offline: Option<String>,
     /// A push found the server had moved, so the next tick fetches.
     stale: bool,
+    /// The head at which the index last had its file stats stored.
+    refreshed: Option<String>,
     /// A head the server's push check refused, with its reason.
     refused: Option<(String, String)>,
     /// The last report the server took, and when.
@@ -194,6 +196,12 @@ impl Autosave {
             None => {
                 let reason = "HEAD is detached, not on main".to_owned();
                 return Ok((Outcome::Blocked(reason), folder.head));
+            }
+        }
+        if folder.head.is_some() && self.state.refreshed != folder.head {
+            let run = self.git.run(&["update-index", "-q", "--refresh"])?;
+            if run.success {
+                self.state.refreshed.clone_from(&folder.head);
             }
         }
         let mut head = folder.head.clone();
@@ -306,8 +314,11 @@ impl Autosave {
     }
 
     /// Stores what the files look like in the index. The service's own `git status` does not,
-    /// so that it never takes the index's lock from under a writer, and a checkout refuses to
-    /// move a file whose entry is out of date even when its text is unchanged.
+    /// so that it never takes the index's lock from under a writer. A checkout refuses to move a
+    /// file whose entry is out of date even when its text is unchanged, and every `git status`
+    /// reads again each page whose entry was written in the same second as the page. So the
+    /// service stores them before it moves the folder, and on the first tick after the head
+    /// moves, when that second has passed.
     fn refresh_index(&self) -> Result<()> {
         self.git.ok(&["update-index", "-q", "--refresh"])?;
         Ok(())
