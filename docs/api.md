@@ -101,13 +101,22 @@ Example: [`search.json`](../tests/fixtures/api/search.json).
 
 Every machine in the tokens file, by name, as `{ "total", "machines": [Machine] }`. The server keeps this in memory, so it is empty again after a restart.
 
-A `Machine` has `name`, `seen` (when it last made a Git request with its token that carried no report, so its last fetch or push), `reported` (when its last report arrived), the `state`, `detail` and `head` of that report, and `current`, which is `true` when the reported head is the server's head. Every field but `name` and `current` is `null` until the machine has done that.
+A `Machine` has `name`, `seen` (when it last made a Git request with its token that carried no report, so its last fetch or push), `reported` (when its last report arrived), the `state`, `detail`, `head`, `skipped` and `skipped_more` of that report, and `current`, which is `true` when the reported head is the server's head. Every field but `name` and `current` is `null` until the machine has done that.
 
 Example: [`machines.json`](../tests/fixtures/api/machines.json).
 
 ## Reports
 
-An autosave service reports its state in a `Mneme-Report` header on a Git request, which it makes with `git ls-remote` and its token. Git sends it, so the report takes the same path and trusts the same certificates as syncing. The header's value is the report's JSON in base64, `{ "state", "detail", "head" }`. `state` is a short word such as `idle` or `blocked`, `detail` says why or is empty, and `head` is the clone's `main` as a full commit id, or `null`.
+An autosave service reports its state in a `Mneme-Report` header on a Git request, which it makes with `git ls-remote` and its token. Git sends it, so the report takes the same path and trusts the same certificates as syncing. The header's value is the report's JSON in base64, `{ "state", "detail", "head", "skipped", "skipped_more" }`. `state` is a short word such as `idle` or `blocked`, `detail` says why or is empty, and `head` is the clone's `main` as a full commit id, or `null` when the folder could not be read. `skipped` lists, by path, up to 20 files the service leaves in the folder and out of every save, each as `{ "path", "reason" }`, and `skipped_more` counts the rest. A long list is cut shorter so that the header stays under 4 KiB. The reasons are:
+
+| `reason` | The file |
+| --- | --- |
+| `a symlink` | is a symbolic link |
+| `a submodule or nested repository` | is a folder with a Git repository of its own; its path ends in `/` |
+| `a path named .git` | has `.git` in any case as one of its path's parts |
+| `a page over 1 MiB` | is a `.md` file over 1 MiB |
+| `a file over 10 MiB` | is any other file over 10 MiB |
+| `a name Git will not store` | is new and has a name Git refuses, such as `git~1`, which Windows reads as `.git` |
 
 The server stores the report and answers the Git request as usual. A request that carries a report does not change `seen`. A header over 4 KiB is `413`, one that is not base64 or not JSON is `400`, and a report with missing or unknown fields or bad values is `422`, each with `{ "error" }` and without running the Git request. A request without the right token is `401` with no body, whatever it carries.
 

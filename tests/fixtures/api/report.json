@@ -1,5 +1,12 @@
 {
   "state": "blocked",
   "detail": "a merge is in progress",
-  "head": "faf510a1fb457f1af5496ca64dea77ed68ddb2f8"
+  "head": "faf510a1fb457f1af5496ca64dea77ed68ddb2f8",
+  "skipped": [
+    {
+      "path": "notes/scan.pdf",
+      "reason": "a file over 10 MiB"
+    }
+  ],
+  "skipped_more": 0
 }

@@ -7,6 +7,8 @@
       "name": "aeolus",
       "reported": null,
       "seen": null,
+      "skipped": null,
+      "skipped_more": null,
       "state": null
     },
     {
@@ -14,8 +16,15 @@
       "detail": "a merge is in progress",
       "head": "faf510a1fb457f1af5496ca64dea77ed68ddb2f8",
       "name": "blackbox",
-      "reported": 1794389925,
-      "seen": 1794389925,
+      "reported": 1794404809,
+      "seen": 1794404809,
+      "skipped": [
+        {
+          "path": "notes/scan.pdf",
+          "reason": "a file over 10 MiB"
+        }
+      ],
+      "skipped_more": 0,
       "state": "blocked"
     },
     {
@@ -25,6 +34,8 @@
       "name": "cassia",
       "reported": null,
       "seen": null,
+      "skipped": null,
+      "skipped_more": null,
       "state": null
     }
   ],

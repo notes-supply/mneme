@@ -6,7 +6,8 @@ use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mneme::autosave::{Autosave, Config, Outcome, Token};
-use serde_json::Value;
+use mneme::rules::{MAX_FILE, MAX_PAGE};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::git::Isolation;
@@ -130,6 +131,30 @@ impl Wiki {
             .clone()
     }
 
+    /// Commits `text` to `path` on another clone and pushes it.
+    fn push_from_elsewhere(&self, path: &str, text: &str) {
+        let other = TempDir::new().unwrap();
+        let header = format!("http.extraHeader=Authorization: Bearer {}", MACHINES[0].1);
+        let url = self.server.git_url();
+        self.git
+            .ok(other.path(), &["-c", &header, "clone", "-q", &url, "."]);
+        fs::write(other.path().join(path), text).unwrap();
+        self.git.ok(other.path(), &["add", "-A"]);
+        self.git
+            .ok(other.path(), &["commit", "-q", "-m", "Edit elsewhere"]);
+        self.git.ok(
+            other.path(),
+            &["-c", &header, "push", "-q", "origin", "main"],
+        );
+    }
+
+    /// Whether `path` is in the commit `at`.
+    fn has(&self, at: &str, path: &str) -> bool {
+        self.git(&["cat-file", "-e", &format!("{at}:{path}")])
+            .status
+            .success()
+    }
+
     /// The path of every request the server logged with this clone's token.
     fn requests(&self) -> Vec<String> {
         self.server
@@ -173,6 +198,163 @@ fn the_service_reports_its_state_with_a_git_request() {
             "{path} is not a Git route"
         );
     }
+}
+
+/// A file of `size` bytes that takes no room on disk.
+fn sparse(path: &Path, size: u64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    File::create(path).unwrap().set_len(size).unwrap();
+}
+
+/// One file of each kind the server refuses or Git cannot store, with the reason the service
+/// gives for leaving it out, by path.
+fn write_bad_files(wiki: &Wiki) -> Vec<(String, &'static str)> {
+    let folder = wiki.path();
+    std::os::unix::fs::symlink("page-1.md", folder.join("link.md")).unwrap();
+    sparse(&folder.join("big.md"), MAX_PAGE + 1);
+    sparse(&folder.join("huge.bin"), MAX_FILE + 1);
+    fs::create_dir(folder.join("nested")).unwrap();
+    wiki.git.ok(&folder.join("nested"), &["init", "-q"]);
+    fs::create_dir(folder.join(".GIT")).unwrap();
+    fs::write(folder.join(".GIT/config"), "[core]\n").unwrap();
+    fs::create_dir_all(folder.join("odd/git~1")).unwrap();
+    fs::write(folder.join("odd/git~1/notes.md"), "# Notes\n").unwrap();
+    let mut bad = vec![
+        (".GIT/config".to_owned(), "a path named .git"),
+        ("big.md".to_owned(), "a page over 1 MiB"),
+        ("huge.bin".to_owned(), "a file over 10 MiB"),
+        ("link.md".to_owned(), "a symlink"),
+        ("nested/".to_owned(), "a submodule or nested repository"),
+        ("odd/git~1/notes.md".to_owned(), "a name Git will not store"),
+    ];
+    bad.sort();
+    bad
+}
+
+fn skipped(entries: &[(String, &str)]) -> Value {
+    entries
+        .iter()
+        .map(|(path, reason)| json!({ "path": path, "reason": reason }))
+        .collect()
+}
+
+/// The good edit beside them is saved and pushed, and the bad files stay in the folder, out of
+/// history, listed in the report. They are not unsaved edits, so the service still replays.
+#[test]
+fn files_the_server_would_refuse_stay_in_the_folder_and_the_rest_is_saved() {
+    let mut wiki = Wiki::new();
+    let bad = write_bad_files(&wiki);
+    wiki.write("page-2.md", "# Page 2\n\na good edit\n");
+    assert_eq!(wiki.tick(), Outcome::Pushed);
+    let head = wiki.head();
+    assert_eq!(wiki.server_head(), head);
+    assert_eq!(
+        wiki.ok(&["show", "HEAD:page-2.md"]),
+        "# Page 2\n\na good edit\n"
+    );
+    for (path, _) in &bad {
+        assert!(
+            !wiki.has("HEAD", path.trim_end_matches('/')),
+            "{path} is not saved"
+        );
+        assert!(
+            fs::symlink_metadata(wiki.path().join(path)).is_ok(),
+            "{path} is still in the folder"
+        );
+    }
+    let reported = wiki.reported();
+    assert_eq!(reported["skipped"], skipped(&bad));
+    assert_eq!(reported["skipped_more"], 0);
+    assert_eq!(wiki.tick(), Outcome::Idle, "nothing is left to save");
+
+    wiki.push_from_elsewhere("page-5.md", "# Page 5\n\nfrom elsewhere\n");
+    wiki.write("page-3.md", "# Page 3\n\nby hand\n");
+    wiki.ok(&["commit", "-q", "-am", "Edit by hand"]);
+    assert_eq!(wiki.tick(), Outcome::Pushed, "the hand commit is replayed");
+    assert_eq!(wiki.server_head(), wiki.head());
+    assert!(
+        wiki.ok(&["show", "HEAD:page-5.md"])
+            .contains("from elsewhere")
+    );
+    assert!(wiki.ok(&["show", "HEAD:page-3.md"]).contains("by hand"));
+    assert_eq!(wiki.reported()["skipped"], skipped(&bad));
+}
+
+/// A page that becomes a symlink or grows over the limit keeps its last good version in
+/// history until it is fixed.
+#[test]
+fn a_tracked_page_that_turns_bad_keeps_its_last_good_version() {
+    let mut wiki = Wiki::new();
+    fs::remove_file(wiki.path().join("page-2.md")).unwrap();
+    std::os::unix::fs::symlink("page-1.md", wiki.path().join("page-2.md")).unwrap();
+    sparse(&wiki.path().join("page-3.md"), MAX_PAGE + 1);
+    wiki.write("page-4.md", "# Page 4\n\na good edit\n");
+    assert_eq!(wiki.tick(), Outcome::Pushed);
+    for page in [2, 3] {
+        assert_eq!(
+            wiki.ok(&["show", &format!("HEAD:page-{page}.md")]),
+            format!("# Page {page}\n\nline one\nline two\n")
+        );
+    }
+    assert!(wiki.ok(&["show", "HEAD:page-4.md"]).contains("a good edit"));
+    let bad = [
+        ("page-2.md".to_owned(), "a symlink"),
+        ("page-3.md".to_owned(), "a page over 1 MiB"),
+    ];
+    assert_eq!(wiki.reported()["skipped"], skipped(&bad));
+
+    fs::remove_file(wiki.path().join("page-2.md")).unwrap();
+    wiki.write("page-2.md", "# Page 2\n\nfixed\n");
+    assert_eq!(wiki.tick(), Outcome::Pushed);
+    assert!(wiki.ok(&["show", "HEAD:page-2.md"]).contains("fixed"));
+    assert_eq!(wiki.reported()["skipped"], skipped(&bad[1..]));
+}
+
+/// Staging a symlink by hand does not get it into the service's commit.
+#[test]
+fn a_bad_file_staged_by_hand_is_left_out_of_the_save() {
+    let mut wiki = Wiki::new();
+    std::os::unix::fs::symlink("page-1.md", wiki.path().join("link.md")).unwrap();
+    wiki.ok(&["add", "link.md"]);
+    wiki.write("page-2.md", "# Page 2\n\na good edit\n");
+    assert_eq!(wiki.tick(), Outcome::Pushed);
+    assert!(!wiki.has("HEAD", "link.md"));
+    assert_eq!(wiki.ok(&["ls-files", "link.md"]), "", "it is not staged");
+    assert!(wiki.ok(&["show", "HEAD:page-2.md"]).contains("a good edit"));
+    assert_eq!(
+        wiki.reported()["skipped"],
+        skipped(&[("link.md".to_owned(), "a symlink")])
+    );
+}
+
+/// The report lists at most twenty left-out paths, and fewer when they are long, so that it
+/// fits in its header, and counts the rest.
+#[test]
+fn the_report_lists_twenty_skipped_paths_and_counts_the_rest() {
+    let mut wiki = Wiki::new();
+    for n in 0..25 {
+        let link = wiki.path().join(format!("link-{n:02}.md"));
+        std::os::unix::fs::symlink("page-1.md", link).unwrap();
+    }
+    assert_eq!(wiki.tick(), Outcome::Idle);
+    let reported = wiki.reported();
+    let listed = reported["skipped"].as_array().unwrap();
+    assert_eq!(listed.len(), 20);
+    assert_eq!(listed[0]["path"], "link-00.md");
+    assert_eq!(reported["skipped_more"], 5);
+
+    let mut wiki = Wiki::new();
+    let deep = vec!["d".repeat(250); 6].join("/");
+    for n in 0..3 {
+        let link = wiki.path().join(format!("{deep}/link-{n}.md"));
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("page-1.md", link).unwrap();
+    }
+    assert_eq!(wiki.tick(), Outcome::Idle);
+    let reported = wiki.reported();
+    let listed = reported["skipped"].as_array().unwrap().len();
+    assert!(listed < 3, "{listed} long paths fit");
+    assert_eq!(reported["skipped_more"], 3 - listed);
 }
 
 #[test]

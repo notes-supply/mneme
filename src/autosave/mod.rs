@@ -6,7 +6,9 @@ mod cli;
 mod folder;
 mod git;
 mod replay;
+mod save;
 
+use std::collections::HashSet;
 use std::fmt;
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -16,11 +18,12 @@ use anyhow::{Result, bail};
 use serde_json::json;
 
 use crate::log;
-use crate::machines::{REPORT_HEADER, Report};
+use crate::machines::{MAX_REPORT, MAX_SKIPPED, REPORT_HEADER, Report, Skipped};
 pub use cli::{Command, main};
-use folder::Folder;
+use folder::{Folder, Leave};
 use git::Git;
 use replay::Local;
+use save::{Left, Save};
 
 /// The longest detail a report carries, under the server's limit.
 const MAX_DETAIL: usize = 1000;
@@ -121,6 +124,8 @@ struct State {
     refreshed: Option<String>,
     /// A head the server's push check refused, with its reason.
     refused: Option<(String, String)>,
+    /// New files whose names Git would not stage, so that a save does not try them each tick.
+    unstorable: HashSet<Vec<u8>>,
     /// The last report the server took, and when.
     reported: Option<(Report, SystemTime)>,
 }
@@ -134,10 +139,13 @@ enum Shape {
     Diverged(Vec<Local>),
 }
 
-enum Save {
-    Saved(String),
-    Stopped(String),
-    Nothing,
+/// What a tick saw of the folder, for its report.
+#[derive(Default)]
+struct Seen {
+    /// The folder's head, or `None` when a guard stopped the tick before reading it.
+    head: Option<String>,
+    /// What the service leaves in the folder, by path.
+    left: Vec<Left>,
 }
 
 enum Push {
@@ -171,28 +179,33 @@ impl Autosave {
     /// It never fails: what goes wrong is the outcome, and the next tick tries again.
     pub fn tick(&mut self, now: SystemTime) -> Outcome {
         self.git.set_now(now);
-        let (outcome, head) = self
+        let (outcome, seen) = self
             .step(now)
-            .unwrap_or_else(|error| (Outcome::Blocked(format!("{error:#}")), None));
-        self.report(now, &outcome, head);
+            .unwrap_or_else(|error| (Outcome::Blocked(format!("{error:#}")), Seen::default()));
+        self.report(now, &outcome, seen);
         outcome
     }
 
-    fn step(&mut self, now: SystemTime) -> Result<(Outcome, Option<String>)> {
+    fn step(&mut self, now: SystemTime) -> Result<(Outcome, Seen)> {
         if let Some(reason) = self.blocked(now)? {
-            return Ok((Outcome::Blocked(reason), None));
+            return Ok((Outcome::Blocked(reason), Seen::default()));
         }
-        let folder = Folder::read(&self.git)?;
-        match folder.branch.as_deref() {
-            Some("main") => {}
-            Some(other) => {
-                let reason = format!("HEAD is on {other}, not main");
-                return Ok((Outcome::Blocked(reason), folder.head));
-            }
-            None => {
-                let reason = "HEAD is detached, not on main".to_owned();
-                return Ok((Outcome::Blocked(reason), folder.head));
-            }
+        let mut folder = Folder::read(&self.git)?;
+        let unstorable = &mut self.state.unstorable;
+        unstorable.retain(|name| folder.changes.iter().any(|changed| changed.path == *name));
+        folder.leave_unstorable(unstorable);
+        let mut left = save::left(&folder);
+        let reason = match folder.branch.as_deref() {
+            Some("main") => None,
+            Some(other) => Some(format!("HEAD is on {other}, not main")),
+            None => Some("HEAD is detached, not on main".to_owned()),
+        };
+        if let Some(reason) = reason {
+            let seen = Seen {
+                head: folder.head,
+                left,
+            };
+            return Ok((Outcome::Blocked(reason), seen));
         }
         if folder.head.is_some()
             && folder.head == self.state.last_head
@@ -206,15 +219,22 @@ impl Autosave {
         let mut head = folder.head.clone();
         let mut progress = Progress::Idle;
         let mut stopped = None;
-        let mut dirty = !folder.clean();
-        if dirty && folder.quiet(&self.config.folder, now, self.config.quiet) {
-            match self.save(&folder)? {
+        let mut pending = folder.pending();
+        if pending && folder.quiet(now, self.config.quiet) {
+            let (saved, refused) = save::save(&self.git, &self.config.machine, &folder)?;
+            for refused in &refused {
+                if refused.leave == Leave::Unstorable {
+                    self.state.unstorable.insert(refused.path.clone());
+                }
+            }
+            left.extend(refused);
+            match saved {
                 Save::Saved(commit) => {
                     head = Some(commit);
                     progress = Progress::Saved;
-                    dirty = false;
+                    pending = false;
                 }
-                Save::Nothing => dirty = false,
+                Save::Nothing => pending = false,
                 Save::Stopped(reason) => stopped = Some(reason),
             }
         }
@@ -224,7 +244,7 @@ impl Autosave {
         }
         let mut blocked = None;
         if fetched && self.state.offline.is_none() {
-            blocked = self.integrate_and_push(&mut head, &mut progress, dirty)?;
+            blocked = self.integrate_and_push(&mut head, &mut progress, pending)?;
             if let Some((_, at)) = &mut self.state.fetched {
                 at.clone_from(&head);
             }
@@ -245,7 +265,9 @@ impl Autosave {
                 Progress::Pushed => Outcome::Pushed,
             },
         };
-        Ok((outcome, head))
+        left.sort_by(|a, b| a.path.cmp(&b.path));
+        left.dedup_by(|a, b| a.path == b.path);
+        Ok((outcome, Seen { head, left }))
     }
 
     /// Why the folder must not be touched now, from what Git leaves in `.git`. An
@@ -322,46 +344,6 @@ impl Autosave {
     fn refresh_index(&self) -> Result<()> {
         self.git.ok(&["update-index", "-q", "--refresh"])?;
         Ok(())
-    }
-
-    /// Commits everything, unless that would delete more than half of the pages and more
-    /// than five.
-    fn save(&self, folder: &Folder) -> Result<Save> {
-        let lost = folder.pages_lost();
-        if lost > 5 {
-            let tracked = match &folder.head {
-                Some(head) => self
-                    .git
-                    .ok(&["ls-tree", "-r", "-z", "--name-only", head])?
-                    .split(|&b| b == 0)
-                    .filter(|path| folder::is_page(path))
-                    .count(),
-                None => 0,
-            };
-            if lost * 2 > tracked {
-                return Ok(Save::Stopped(format!(
-                    "the save would delete {lost} of {tracked} pages"
-                )));
-            }
-        }
-        self.git.ok(&["add", "--all"])?;
-        if self.git.run(&["diff", "--cached", "--quiet"])?.success {
-            return Ok(Save::Nothing);
-        }
-        let machine = self.config.machine.as_str();
-        let message = format!("Autosave from {machine}");
-        let email = git::email(machine);
-        let author = [
-            ("GIT_AUTHOR_NAME", machine),
-            ("GIT_AUTHOR_EMAIL", email.as_str()),
-            ("GIT_AUTHOR_DATE", self.git.date()),
-        ];
-        self.git.ok_with(
-            &["commit", "--quiet", "--no-verify", "-m", &message],
-            &author,
-            &[],
-        )?;
-        Ok(Save::Saved(self.git.line(&["rev-parse", "HEAD"])?))
     }
 
     /// On the first tick, when the head moved since the last fetch, after the server moved
@@ -458,7 +440,7 @@ impl Autosave {
         &mut self,
         head: &mut Option<String>,
         progress: &mut Progress,
-        dirty: bool,
+        pending: bool,
     ) -> Result<Option<String>> {
         let origin = self.origin()?;
         let ahead = match self.shape(head.as_deref(), origin.as_deref())? {
@@ -476,7 +458,7 @@ impl Autosave {
             }
             Shape::Ahead => true,
             Shape::Diverged(commits) => {
-                if dirty || !self.integrate(head.as_deref(), origin.as_deref(), &commits)? {
+                if pending || !self.integrate(head.as_deref(), origin.as_deref(), &commits)? {
                     return Ok(None);
                 }
                 *head = self.head()?;
@@ -599,7 +581,7 @@ impl Autosave {
     /// that does not arrive is sent again on the next tick. It goes as a header on a Git
     /// request, so it reaches the server exactly as syncing does, through the same proxy and
     /// certificates.
-    fn report(&mut self, now: SystemTime, outcome: &Outcome, head: Option<String>) {
+    fn report(&mut self, now: SystemTime, outcome: &Outcome, seen: Seen) {
         let mut detail = outcome.detail().to_owned();
         if detail.len() > MAX_DETAIL {
             let cut = (0..=MAX_DETAIL)
@@ -608,11 +590,26 @@ impl Autosave {
                 .unwrap_or(0);
             detail.truncate(cut);
         }
-        let report = Report {
+        let total = seen.left.len();
+        let mut report = Report {
             state: outcome.state().to_owned(),
             detail,
-            head,
+            head: seen.head,
+            skipped: seen
+                .left
+                .into_iter()
+                .take(MAX_SKIPPED)
+                .map(|left| Skipped {
+                    path: String::from_utf8_lossy(&left.path).into_owned(),
+                    reason: left.leave.to_string(),
+                })
+                .collect(),
+            skipped_more: 0,
         };
+        report.skipped_more = total - report.skipped.len();
+        while report.encode().len() > MAX_REPORT && report.skipped.pop().is_some() {
+            report.skipped_more += 1;
+        }
         let due = match &self.state.reported {
             None => true,
             Some((last, at)) => *last != report || *at + self.config.report_every <= now,

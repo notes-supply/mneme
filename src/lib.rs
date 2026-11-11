@@ -17,6 +17,7 @@ pub mod log;
 pub mod machines;
 pub mod markdown;
 pub mod repo;
+pub mod rules;
 pub mod serve;
 pub mod text;
 

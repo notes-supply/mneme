@@ -106,6 +106,11 @@ impl Git {
         &self.repository
     }
 
+    /// The wiki folder, the work tree.
+    pub fn folder(&self) -> &Path {
+        &self.folder
+    }
+
     /// Dates the commits of the coming commands at `now`.
     pub fn set_now(&mut self, now: SystemTime) {
         let secs = now

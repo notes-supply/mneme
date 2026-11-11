@@ -9,10 +9,8 @@ use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result, bail};
 
-use crate::repo::{MAIN, is_page};
-
-/// The largest page a push may hold.
-const MAX_PAGE: u64 = 1 << 20;
+use crate::repo::MAIN;
+use crate::rules::{self, Broken, Entry};
 
 /// Why a push is refused. Each reason is one line, which the pushing client shows.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -23,14 +21,12 @@ pub enum Refusal {
     Deletion,
     #[error("commit {0} is a merge, and {MAIN} keeps one line of history")]
     Merge(String),
-    #[error("commit {commit} has a symlink at {path}")]
-    Symlink { commit: String, path: String },
-    #[error("commit {commit} has a submodule at {path}")]
-    Submodule { commit: String, path: String },
-    #[error("commit {commit} has a path named .git: {path}")]
-    DotGit { commit: String, path: String },
-    #[error("commit {commit} has a page over 1 MiB: {path}")]
-    LargePage { commit: String, path: String },
+    #[error("commit {commit} has {broken} at {path}")]
+    Broken {
+        commit: String,
+        path: String,
+        broken: Broken,
+    },
 }
 
 /// Installs the hook into the bare repository at `repo`, as a script that runs this binary.
@@ -110,25 +106,19 @@ fn check_tree(commit: &str) -> Result<Result<(), Refusal>> {
         let Some((facts, path)) = entry.split_once('\t') else {
             bail!("unexpected ls-tree entry {entry:?}");
         };
-        let mut facts = facts.split(' ');
-        let (mode, kind, size) = (facts.next(), facts.next(), facts.next());
-        let found =
-            |make: fn(String, String) -> Refusal| Ok(Err(make(commit.to_owned(), path.to_owned())));
-        if path
-            .split('/')
-            .any(|part| part.eq_ignore_ascii_case(".git"))
-        {
-            return found(|commit, path| Refusal::DotGit { commit, path });
-        }
-        if mode == Some("120000") {
-            return found(|commit, path| Refusal::Symlink { commit, path });
-        }
-        if kind == Some("commit") {
-            return found(|commit, path| Refusal::Submodule { commit, path });
-        }
-        let size: u64 = size.and_then(|size| size.parse().ok()).unwrap_or(0);
-        if kind == Some("blob") && is_page(path.as_bytes()) && size > MAX_PAGE {
-            return found(|commit, path| Refusal::LargePage { commit, path });
+        let entry = match facts.split(' ').collect::<Vec<_>>()[..] {
+            ["120000", "blob", _] => Entry::Symlink,
+            [_, "blob", size] => Entry::File(size.parse()?),
+            [_, "tree", _] => Entry::Folder,
+            [_, "commit", _] => Entry::Repository,
+            _ => bail!("unexpected ls-tree entry {entry:?}"),
+        };
+        if let Some(broken) = rules::check(path.as_bytes(), entry) {
+            return Ok(Err(Refusal::Broken {
+                commit: commit.to_owned(),
+                path: path.to_owned(),
+                broken,
+            }));
         }
     }
     Ok(Ok(()))

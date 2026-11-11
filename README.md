@@ -19,7 +19,7 @@ The reading API is described in [docs/api.md](docs/api.md).
 
 ## Autosave
 
-Each writer's machine runs `mneme autosave` on its wiki folder. Writers only edit files. The service commits what has been still for 15 seconds, fetches, replays its commits on top of the server's, and pushes, every few seconds and without ever waiting for a person. Where two machines changed the same lines, the later one keeps its own text and marks its commit with an `Overlap:` trailer. It waits instead when the folder is in the middle of a Git operation it did not start, and stops saving when a save would delete most pages.
+Each writer's machine runs `mneme autosave` on its wiki folder. Writers only edit files. The service commits what has been still for 15 seconds, fetches, replays its commits on top of the server's, and pushes, every few seconds and without ever waiting for a person. Where two machines changed the same lines, the later one keeps its own text and marks its commit with an `Overlap:` trailer. It waits instead when the folder is in the middle of a Git operation it did not start, and stops saving when a save would delete most pages. A file the server would refuse, such as a symlink or a page over 1 MiB, stays in the folder and out of every save, and the service reports it.
 
 ```sh
 mneme autosave init --folder ~/wiki --server https://host --token-file ~/.config/mneme/token --name blackbox

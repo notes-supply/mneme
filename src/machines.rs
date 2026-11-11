@@ -12,8 +12,11 @@ use serde::{Deserialize, Serialize};
 pub const REPORT_HEADER: &str = "Mneme-Report";
 /// The longest report header value.
 pub const MAX_REPORT: usize = 4 << 10;
+/// The most skipped paths a report lists.
+pub const MAX_SKIPPED: usize = 20;
 const MAX_STATE: usize = 64;
 const MAX_DETAIL: usize = 1024;
+const MAX_REASON: usize = 64;
 
 /// What an autosave service reports, as JSON in base64 in its [`REPORT_HEADER`].
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -25,6 +28,19 @@ pub struct Report {
     pub detail: String,
     /// The clone's `main`, or `None` when it has no commit yet.
     pub head: Option<String>,
+    /// Paths the service leaves out of its saves, by path, at most [`MAX_SKIPPED`].
+    pub skipped: Vec<Skipped>,
+    /// How many more it leaves out than `skipped` lists.
+    pub skipped_more: usize,
+}
+
+/// A path the service leaves in the folder rather than commit, since the server would refuse
+/// it or Git cannot store it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Skipped {
+    pub path: String,
+    pub reason: String,
 }
 
 /// Why a report header cannot be stored.
@@ -83,6 +99,16 @@ impl Report {
         if self.head.as_ref().is_some_and(|head| !commit(head)) {
             return Some("head is not a full commit id");
         }
+        if self.skipped.len() > MAX_SKIPPED {
+            return Some("skipped lists more than 20 paths");
+        }
+        if self.skipped.iter().any(|skipped| {
+            skipped.path.is_empty()
+                || skipped.reason.is_empty()
+                || skipped.reason.len() > MAX_REASON
+        }) {
+            return Some("a skipped path or its reason is empty, or the reason is too long");
+        }
         None
     }
 }
@@ -98,6 +124,8 @@ pub struct Health {
     pub state: Option<String>,
     pub detail: Option<String>,
     pub head: Option<String>,
+    pub skipped: Option<Vec<Skipped>>,
+    pub skipped_more: Option<usize>,
     /// Whether the reported head is the server's head.
     pub current: bool,
 }
@@ -152,6 +180,8 @@ impl Machines {
                     detail: report.map(|(_, report)| report.detail.clone()),
                     current: report.is_some() && reported_head.as_deref() == head,
                     head: reported_head,
+                    skipped: report.map(|(_, report)| report.skipped.clone()),
+                    skipped_more: report.map(|(_, report)| report.skipped_more),
                 }
             })
             .collect()

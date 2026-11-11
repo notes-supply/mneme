@@ -154,7 +154,7 @@ fn a_submodule_is_refused() {
         &server,
         &work,
         &["origin", "main"],
-        "has a submodule at vendor/lib",
+        "has a submodule or nested repository at vendor/lib",
     );
 }
 
@@ -209,12 +209,29 @@ fn a_page_over_one_mebibyte_is_refused() {
         &server,
         &work,
         &["origin", "main"],
-        "has a page over 1 MiB: big.md",
+        "has a page over 1 MiB at big.md",
     );
     work.ok(&["rm", "-q", "--cached", "big.md"]);
     work.ok(&["commit", "-q", "--amend", "-m", "Big, but not a page"]);
     let (ok, said) = work.push(&["origin", "main"]);
     assert!(ok, "a large file that is not a page is stored: {said}");
+}
+
+#[test]
+fn a_file_over_ten_mebibytes_is_refused() {
+    let (server, work) = wiki();
+    work.write("huge.bin", &"a".repeat((10 << 20) + 1));
+    work.commit("Huge");
+    assert_refused(
+        &server,
+        &work,
+        &["origin", "main"],
+        "has a file over 10 MiB at huge.bin",
+    );
+    work.write("huge.bin", &"a".repeat(10 << 20));
+    work.ok(&["commit", "-q", "-a", "--amend", "-m", "Ten MiB"]);
+    let (ok, said) = work.push(&["origin", "main"]);
+    assert!(ok, "a file of exactly 10 MiB is stored: {said}");
 }
 
 #[test]

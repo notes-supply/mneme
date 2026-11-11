@@ -15,6 +15,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mneme::autosave::{Autosave, Config, Outcome, Token};
+use mneme::rules::{MAX_FILE, MAX_PAGE};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::git::Isolation;
@@ -94,6 +96,8 @@ struct Tally {
     hand_commits: usize,
     hand_merges: usize,
     dead_locks: usize,
+    bad_files: usize,
+    bad_files_fixed: usize,
     commits_made: usize,
     replays_that_overlapped: usize,
     replays_that_merged: usize,
@@ -117,6 +121,8 @@ impl Tally {
         self.hand_commits += other.hand_commits;
         self.hand_merges += other.hand_merges;
         self.dead_locks += other.dead_locks;
+        self.bad_files += other.bad_files;
+        self.bad_files_fixed += other.bad_files_fixed;
         self.commits_made += other.commits_made;
         self.replays_that_overlapped += other.replays_that_overlapped;
         self.replays_that_merged += other.replays_that_merged;
@@ -133,6 +139,8 @@ struct Clone {
     online: bool,
     /// Lines of the reflog of `main` already read.
     reflog: usize,
+    /// Files the service must leave in the folder, as its report names them, with the reason.
+    bad: BTreeMap<String, &'static str>,
 }
 
 impl Clone {
@@ -164,13 +172,20 @@ impl Clone {
         self.ok(&["rev-parse", "HEAD"]).trim().to_owned()
     }
 
+    /// The changes in the folder, less the bad files the service leaves there.
     fn status(&self) -> String {
         self.ok(&["status", "--porcelain", "--untracked-files=all"])
+            .lines()
+            .filter(|line| !self.bad.contains_key(&line[3..]))
+            .flat_map(|line| [line, "\n"])
+            .collect()
     }
 
+    /// The pages in the folder, less the bad ones.
     fn pages(&self) -> Vec<String> {
         let mut pages = Vec::new();
         walk(self.path(), "", &mut pages);
+        pages.retain(|page| !self.bad.contains_key(page));
         pages.sort();
         pages
     }
@@ -362,6 +377,7 @@ impl Sim {
             service,
             online: true,
             reflog: 0,
+            bad: BTreeMap::new(),
         };
         clone.reflog = reflog(&clone).len();
         clone
@@ -406,9 +422,10 @@ impl Sim {
             75..79 => self.rename(clone, true),
             79..84 => self.overlap_on_purpose(clone),
             84..86 => self.delete_on_two(clone),
-            86..90 => self.hand_commit(clone),
-            90..94 => self.hand_pull(clone),
-            94..96 => self.dead_lock(clone),
+            86..89 => self.hand_commit(clone),
+            89..92 => self.hand_pull(clone),
+            92..94 => self.dead_lock(clone),
+            94..97 => self.bad_file(clone),
             _ => self.toggle_network(clone),
         }
     }
@@ -715,7 +732,18 @@ impl Sim {
         let message = format!("Hand edit {token}\n\nAn agent committed this by hand.");
         let now = self.now;
         let target = &self.clones[clone];
-        target.ok(&["add", "-A"]);
+        let mut add = vec![
+            "add".to_owned(),
+            "-A".to_owned(),
+            "--".to_owned(),
+            ".".to_owned(),
+        ];
+        for path in target.bad.keys() {
+            let top = path.split('/').next().unwrap();
+            add.push(format!(":(exclude){top}"));
+        }
+        let add: Vec<&str> = add.iter().map(String::as_str).collect();
+        target.ok(&add);
         let output = target.git_at(now, &["commit", "-q", "-m", &message]);
         assert!(output.status.success(), "{output:?}");
         self.note(clone, &format!("hand commit {token}"));
@@ -794,6 +822,75 @@ impl Sim {
         assert!(!lock.exists(), "seed {}: the dead lock is gone", self.seed);
     }
 
+    /// A writer drops a file the server would refuse or Git cannot store, each at a new top-level
+    /// name, or fixes one: a bad page becomes a good one, and any other bad file goes.
+    fn bad_file(&mut self, clone: usize) {
+        let fixable: Vec<String> = self.clones[clone].bad.keys().cloned().collect();
+        if !fixable.is_empty() && self.rng.u32(..3) == 0 {
+            let path = fixable[self.rng.usize(..fixable.len())].clone();
+            let reason = self.clones[clone].bad.remove(&path).unwrap();
+            let top = path.split('/').next().unwrap();
+            let file = self.clones[clone].path().join(top);
+            if file.is_dir() && !file.is_symlink() {
+                fs::remove_dir_all(&file).unwrap();
+            } else {
+                fs::remove_file(&file).unwrap();
+            }
+            if matches!(reason, "a symlink" | "a page over 1 MiB") {
+                let token = self.token(clone);
+                self.write(clone, &path, &format!("# Fixed {token}\n\ntext {token}\n"));
+            }
+            self.note(clone, &format!("fix {path}"));
+            self.tally.bad_files_fixed += 1;
+            return;
+        }
+        let token = self.token(clone);
+        let folder = self.clones[clone].path().to_owned();
+        let sparse = |path: &Path, size: u64| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            File::create(path).unwrap().set_len(size).unwrap();
+        };
+        let (path, reason) = match self.rng.usize(..6) {
+            0 => {
+                let path = format!("link-{token}.md");
+                let target = self
+                    .pick_page(clone)
+                    .unwrap_or_else(|| "nowhere.md".to_owned());
+                std::os::unix::fs::symlink(target, folder.join(&path)).unwrap();
+                (path, "a symlink")
+            }
+            1 => {
+                let path = format!("big-{token}.md");
+                sparse(&folder.join(&path), MAX_PAGE + 1);
+                (path, "a page over 1 MiB")
+            }
+            2 => {
+                let path = format!("huge-{token}.bin");
+                sparse(&folder.join(&path), MAX_FILE + 1);
+                (path, "a file over 10 MiB")
+            }
+            3 => {
+                let path = format!("nested-{token}/");
+                fs::create_dir(folder.join(&path)).unwrap();
+                self.clones[clone].ok(&["init", "-q", path.trim_end_matches('/')]);
+                (path, "a submodule or nested repository")
+            }
+            4 => {
+                let path = format!("dotgit-{token}/.GIT/config");
+                self.write(clone, &path, "[core]\n");
+                (path, "a path named .git")
+            }
+            _ => {
+                let path = format!("odd-{token}/git~1/notes.md");
+                self.write(clone, &path, &format!("# Notes {token}\n"));
+                (path, "a name Git will not store")
+            }
+        };
+        self.note(clone, &format!("bad file {path}: {reason}"));
+        self.clones[clone].bad.insert(path, reason);
+        self.tally.bad_files += 1;
+    }
+
     fn toggle_network(&mut self, clone: usize) {
         let online = !self.clones[clone].online;
         let url = if online {
@@ -868,6 +965,26 @@ impl Sim {
             .git
             .ok(self.server.repo(), &["rev-list", "--min-parents=2", "main"]);
         assert_eq!(merges, "", "seed {seed}: the server's history is one line");
+        let machines = self.server.json("/v1/machines");
+        for clone in &self.clones {
+            let reported = machines["machines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|machine| machine["name"] == clone.machine)
+                .unwrap();
+            let bad: Vec<Value> = clone
+                .bad
+                .iter()
+                .map(|(path, reason)| json!({ "path": path, "reason": reason }))
+                .collect();
+            assert_eq!(
+                reported["skipped"],
+                Value::Array(bad),
+                "seed {seed}: {} reports the files it leaves in the folder",
+                clone.machine
+            );
+        }
         let stuck: Vec<_> = self
             .outcomes
             .iter()

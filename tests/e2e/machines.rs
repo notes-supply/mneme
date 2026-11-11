@@ -28,7 +28,7 @@ fn report_raw(server: &Server, authorization: Option<&str>, value: &str) -> Repl
 }
 
 /// A Git request that carries `json` as its report, encoded as the service encodes it.
-fn report(server: &Server, authorization: Option<&str>, json: &str) -> Reply {
+fn send(server: &Server, authorization: Option<&str>, json: &str) -> Reply {
     report_raw(server, authorization, &STANDARD.encode(json))
 }
 
@@ -69,7 +69,15 @@ fn every_machine_is_listed_with_its_last_git_request_and_report() {
         .collect();
     assert_eq!(names, ["aeolus", "blackbox", "cassia"]);
     let aeolus = machine(&server, "aeolus");
-    for key in ["seen", "reported", "state", "detail", "head"] {
+    for key in [
+        "seen",
+        "reported",
+        "state",
+        "detail",
+        "head",
+        "skipped",
+        "skipped_more",
+    ] {
         assert_eq!(aeolus[key], Value::Null, "{key}");
     }
     assert_eq!(aeolus["current"], false);
@@ -84,8 +92,15 @@ fn every_machine_is_listed_with_its_last_git_request_and_report() {
     assert!((before..=now()).contains(&seen), "{seen}");
 
     let head = server_head(&server);
-    let body = json!({ "state": "idle", "detail": "", "head": head }).to_string();
-    let reply = report(&server, Some(&bearer("blackbox")), &body);
+    let body = json!({
+        "state": "idle",
+        "detail": "",
+        "head": head,
+        "skipped": [{ "path": "link.md", "reason": "a symlink" }],
+        "skipped_more": 2,
+    })
+    .to_string();
+    let reply = send(&server, Some(&bearer("blackbox")), &body);
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert!(
         reply.body.contains("git-upload-pack"),
@@ -95,6 +110,11 @@ fn every_machine_is_listed_with_its_last_git_request_and_report() {
     assert_eq!(blackbox["state"], "idle");
     assert_eq!(blackbox["detail"], "");
     assert_eq!(blackbox["head"], head.as_str());
+    assert_eq!(
+        blackbox["skipped"],
+        json!([{ "path": "link.md", "reason": "a symlink" }])
+    );
+    assert_eq!(blackbox["skipped_more"], 2);
     assert_eq!(blackbox["current"], true);
     assert!((before..=now()).contains(&blackbox["reported"].as_i64().unwrap()));
 
@@ -113,7 +133,7 @@ fn every_machine_is_listed_with_its_last_git_request_and_report() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/api/report.json"),
     )
     .unwrap();
-    let reply = report(&server, Some(&bearer("cassia")), &example);
+    let reply = send(&server, Some(&bearer("cassia")), &example);
     assert_eq!(reply.status, 200, "{}", reply.body);
     let cassia = machine(&server, "cassia");
     assert_eq!(cassia["state"], "blocked");
@@ -133,40 +153,65 @@ fn every_machine_is_listed_with_its_last_git_request_and_report() {
 #[test]
 fn a_report_needs_a_token_and_a_well_formed_header() {
     let server = Server::empty(&Isolation::new());
-    let good = json!({ "state": "idle", "detail": "", "head": null }).to_string();
-    let unauthorized = report(&server, None, &good);
+    let report = |state: &str, detail: &str, head: Value, skipped: Value| {
+        json!({
+            "state": state,
+            "detail": detail,
+            "head": head,
+            "skipped": skipped,
+            "skipped_more": 0,
+        })
+        .to_string()
+    };
+    let good = report("idle", "", Value::Null, json!([]));
+    let unauthorized = send(&server, None, &good);
     assert_eq!(unauthorized.status, 401);
     assert_eq!(unauthorized.body, "");
-    assert_eq!(
-        report(&server, Some("Bearer not-a-token"), &good).status,
-        401
-    );
+    assert_eq!(send(&server, Some("Bearer not-a-token"), &good).status, 401);
 
     let blackbox = bearer("blackbox");
     for garbled in [
         report_raw(&server, Some(&blackbox), "not base64!"),
-        report(&server, Some(&blackbox), "not json"),
+        send(&server, Some(&blackbox), "not json"),
     ] {
         assert_eq!(garbled.status, 400, "{}", garbled.body);
         assert!(garbled.json()["error"].is_string());
     }
+    let link = |reason: &str| json!([{ "path": "link.md", "reason": reason }]);
+    let many: Vec<Value> = (0..21)
+        .map(|n| json!({ "path": format!("link-{n}.md"), "reason": "a symlink" }))
+        .collect();
     for body in [
-        json!({ "detail": "", "head": null }).to_string(),
-        json!({ "state": "idle", "detail": "", "head": null, "more": 1 }).to_string(),
-        json!({ "state": "", "detail": "", "head": null }).to_string(),
-        json!({ "state": "idle", "detail": "", "head": "HEAD" }).to_string(),
-        json!({ "state": "idle", "detail": "", "head": "A".repeat(40) }).to_string(),
-        json!({ "state": "idle", "detail": "x".repeat(1025), "head": null }).to_string(),
+        json!({ "detail": "", "head": null, "skipped": [], "skipped_more": 0 }).to_string(),
+        json!({ "state": "idle", "detail": "", "head": null }).to_string(),
+        good.replace("\"skipped_more\":0", "\"skipped_more\":0,\"more\":1"),
+        good.replace("\"skipped_more\":0", "\"skipped_more\":-1"),
+        report("", "", Value::Null, json!([])),
+        report("idle", "", json!("HEAD"), json!([])),
+        report("idle", "", json!("A".repeat(40)), json!([])),
+        report("idle", &"x".repeat(1025), Value::Null, json!([])),
+        report("idle", "", Value::Null, Value::Array(many)),
+        report("idle", "", Value::Null, link("")),
+        report("idle", "", Value::Null, link(&"x".repeat(65))),
+        report(
+            "idle",
+            "",
+            Value::Null,
+            json!([{ "path": "", "reason": "a symlink" }]),
+        ),
+        report(
+            "idle",
+            "",
+            Value::Null,
+            json!([{ "path": "x", "reason": "r", "why": 1 }]),
+        ),
     ] {
-        let reply = report(&server, Some(&blackbox), &body);
+        let reply = send(&server, Some(&blackbox), &body);
         assert_eq!(reply.status, 422, "{body}");
         assert!(reply.json()["error"].is_string(), "{body}");
     }
-    let huge = json!({ "state": "idle", "detail": "x".repeat(3 << 10), "head": null });
-    assert_eq!(
-        report(&server, Some(&blackbox), &huge.to_string()).status,
-        413
-    );
+    let huge = report("idle", &"x".repeat(3 << 10), Value::Null, json!([]));
+    assert_eq!(send(&server, Some(&blackbox), &huge).status, 413);
     let blackbox_now = machine(&server, "blackbox");
     assert_eq!(blackbox_now["state"], Value::Null, "no bad report was kept");
     assert_eq!(
@@ -174,7 +219,7 @@ fn a_report_needs_a_token_and_a_well_formed_header() {
         Value::Null,
         "no refused request was a sync"
     );
-    assert_eq!(report(&server, Some(&blackbox), &good).status, 200);
+    assert_eq!(send(&server, Some(&blackbox), &good).status, 200);
     let stored = machine(&server, "blackbox");
     assert_eq!(stored["state"], "idle");
     assert_eq!(stored["head"], Value::Null);
