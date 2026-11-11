@@ -218,6 +218,19 @@ fn a_page_over_one_mebibyte_is_refused() {
 }
 
 #[test]
+fn a_page_over_one_mebibyte_with_a_name_git_quotes_is_refused() {
+    let (server, work) = wiki();
+    work.write("minnen/café.md", &"a".repeat((1 << 20) + 1));
+    work.commit("Big café");
+    assert_refused(
+        &server,
+        &work,
+        &["origin", "main"],
+        "has a page over 1 MiB at minnen/café.md",
+    );
+}
+
+#[test]
 fn a_file_over_ten_mebibytes_is_refused() {
     let (server, work) = wiki();
     work.write("huge.bin", &"a".repeat((10 << 20) + 1));

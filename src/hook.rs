@@ -80,12 +80,9 @@ pub fn check(updates: impl BufRead) -> Result<Result<(), Refusal>> {
         if new.bytes().all(|b| b == b'0') {
             return Ok(Err(Refusal::Deletion));
         }
-        // One commit per line: rev-list ends its records with NUL under -z only since Git 2.50.
         let listing = git(&["rev-list", "--parents", new, "--not", "--all"])?;
-        for commit in String::from_utf8_lossy(&listing).lines() {
-            let mut ids = commit.split(' ');
-            let id = ids.next().unwrap_or_default().to_owned();
-            if ids.count() > 1 {
+        for (id, parents) in commits(&listing) {
+            if parents > 1 {
                 return Ok(Err(Refusal::Merge(id)));
             }
             if let Err(refusal) = check_tree(&id)? {
@@ -96,30 +93,55 @@ pub fn check(updates: impl BufRead) -> Result<Result<(), Refusal>> {
     Ok(Ok(()))
 }
 
+/// Each commit of a `git rev-list --parents` listing, with how many parents it has. It reads
+/// one commit per line, since `rev-list` ends its records with NUL under `-z` only since Git 2.50.
+fn commits(listing: &[u8]) -> Vec<(String, usize)> {
+    String::from_utf8_lossy(listing)
+        .lines()
+        .map(|line| {
+            let mut ids = line.split(' ');
+            let id = ids.next().unwrap_or_default().to_owned();
+            (id, ids.count())
+        })
+        .collect()
+}
+
 fn check_tree(commit: &str) -> Result<Result<(), Refusal>> {
-    let format = "--format=%(objectmode) %(objecttype) %(objectsize)%x09%(path)";
-    let listing = git(&["ls-tree", "-r", "-t", "-z", format, commit])?;
-    for entry in listing.split(|&b| b == 0).filter(|entry| !entry.is_empty()) {
-        let entry = String::from_utf8_lossy(entry);
-        let Some((facts, path)) = entry.split_once('\t') else {
-            bail!("unexpected ls-tree entry {entry:?}");
-        };
-        let entry = match facts.split(' ').collect::<Vec<_>>()[..] {
-            ["120000", "blob", _] => Entry::Symlink,
-            [_, "blob", size] => Entry::File(size.parse()?),
-            [_, "tree", _] => Entry::Folder,
-            [_, "commit", _] => Entry::Repository,
-            _ => bail!("unexpected ls-tree entry {entry:?}"),
-        };
+    let listing = git(&["ls-tree", "-r", "-t", "-z", "-l", commit])?;
+    for (path, entry) in entries(&listing)? {
         if let Some(broken) = rules::check(path.as_bytes(), entry) {
             return Ok(Err(Refusal::Broken {
                 commit: commit.to_owned(),
-                path: path.to_owned(),
+                path,
                 broken,
             }));
         }
     }
     Ok(Ok(()))
+}
+
+/// Each path of a `git ls-tree -r -t -z -l` listing, with what it holds. The long listing gives
+/// each path as it is, where `--format`'s `%(path)` quotes one with a tab, a newline or a byte
+/// over 0x7f even under `-z`, so that `café.md` would not end in `.md`.
+fn entries(listing: &[u8]) -> Result<Vec<(String, Entry)>> {
+    listing
+        .split(|&b| b == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let entry = String::from_utf8_lossy(entry);
+            let Some((facts, path)) = entry.split_once('\t') else {
+                bail!("unexpected ls-tree entry {entry:?}");
+            };
+            let held = match facts.split_whitespace().collect::<Vec<_>>()[..] {
+                ["120000", "blob", _, _] => Entry::Symlink,
+                [_, "blob", _, size] => Entry::File(size.parse()?),
+                [_, "tree", _, _] => Entry::Folder,
+                [_, "commit", _, _] => Entry::Repository,
+                _ => bail!("unexpected ls-tree entry {entry:?}"),
+            };
+            Ok((path.to_owned(), held))
+        })
+        .collect()
 }
 
 fn git(args: &[&str]) -> Result<Vec<u8>> {
@@ -135,4 +157,65 @@ fn git(args: &[&str]) -> Result<Vec<u8>> {
         );
     }
     Ok(output.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What each Git prints for one repository, saved by `scripts/git-output.sh`.
+    const GITS: [(&str, &[u8], &[u8]); 2] = [
+        (
+            "2.49.1",
+            include_bytes!("../tests/fixtures/git/2.49.1/rev-list"),
+            include_bytes!("../tests/fixtures/git/2.49.1/ls-tree"),
+        ),
+        (
+            "2.56.0",
+            include_bytes!("../tests/fixtures/git/2.56.0/rev-list"),
+            include_bytes!("../tests/fixtures/git/2.56.0/ls-tree"),
+        ),
+    ];
+
+    #[test]
+    fn each_commit_is_read_with_its_parents_from_both_gits() {
+        for (version, rev_list, _) in GITS {
+            let commits = commits(rev_list);
+            let parents: Vec<usize> = commits.iter().map(|(_, parents)| *parents).collect();
+            assert_eq!(
+                parents,
+                [1, 2, 1, 1, 0],
+                "Git {version}: one merge, one root"
+            );
+            assert!(
+                commits
+                    .iter()
+                    .all(|(id, _)| id.len() == 40 && id.bytes().all(|b| b.is_ascii_hexdigit())),
+                "Git {version}: every id is a whole commit id and nothing more: {commits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_entry_is_read_with_its_path_as_it_is_from_both_gits() {
+        let expected = [
+            ("a.md", Entry::File(4)),
+            ("c.md", Entry::File(4)),
+            ("link.md", Entry::Symlink),
+            ("new\nline.md", Entry::File(8)),
+            ("notes", Entry::Folder),
+            ("notes/b.md", Entry::File(4)),
+            ("run.sh", Entry::File(10)),
+            ("side.md", Entry::File(7)),
+            ("tab\tname.md", Entry::File(4)),
+            ("vendor", Entry::Folder),
+            ("vendor/lib", Entry::Repository),
+            ("with space.md", Entry::File(6)),
+            ("ö.md", Entry::File(7)),
+        ]
+        .map(|(path, entry)| (path.to_owned(), entry));
+        for (version, _, ls_tree) in GITS {
+            assert_eq!(entries(ls_tree).unwrap(), expected, "Git {version}");
+        }
+    }
 }
