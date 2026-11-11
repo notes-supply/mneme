@@ -3,6 +3,7 @@ mod autosave;
 mod cli;
 mod git;
 mod history;
+mod kill;
 mod machines;
 mod push;
 mod server;
