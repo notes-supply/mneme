@@ -261,17 +261,16 @@ fn services_killed_at_random_moments_lose_nothing() {
             assert!(!all.contains(token), "the token is never logged");
         }
         let changes = outcomes(&logs[at]);
-        let stopped: Vec<_> = changes
+        let stuck: Vec<_> = changes
             .iter()
-            .filter(|(outcome, _)| outcome == "stopped")
+            .filter(|(outcome, _)| outcome == "stopped" || outcome == "blocked")
             .collect();
-        assert!(stopped.is_empty(), "seed {seed}: {stopped:?}");
-        let blocked: Vec<_> = changes
-            .iter()
-            .filter(|(outcome, _)| outcome == "blocked")
-            .collect();
+        assert!(
+            stuck.is_empty(),
+            "seed {seed}: no tick was blocked or stopped: {stuck:?}"
+        );
         eprintln!(
-            "{}: {kills} kills in all, {} outcome changes, blocked {blocked:?}",
+            "{}: {kills} kills in all, {} outcome changes",
             machines[at].0,
             changes.len()
         );

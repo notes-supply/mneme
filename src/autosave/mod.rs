@@ -425,7 +425,7 @@ impl Autosave {
         {
             return Ok(Some(reason.clone()));
         }
-        Ok(match self.push(&local)? {
+        Ok(match self.push(&local, origin.as_deref())? {
             Push::Done => {
                 self.state.refused = None;
                 *progress = Progress::Pushed;
@@ -485,7 +485,11 @@ impl Autosave {
         Ok(false)
     }
 
-    fn push(&self, head: &str) -> Result<Push> {
+    /// Pushes `head` over `origin`, the server's main as the last fetch saw it. A push the
+    /// server turns down was refused only when its main is still `origin`. When it has moved,
+    /// whether Git noticed before sending or the server only when it took the ref's lock, the
+    /// push lost a race, and the next tick fetches and replays.
+    fn push(&self, head: &str, origin: Option<&str>) -> Result<Push> {
         let refspec = format!("{head}:refs/heads/main");
         let run = self
             .git
@@ -500,7 +504,12 @@ impl Autosave {
         else {
             return Ok(Push::Failed(run.error()));
         };
-        if line.contains("[rejected]") {
+        let listing = self.git.run(&["ls-remote", "origin", "refs/heads/main"])?;
+        if !listing.success {
+            return Ok(Push::Failed(listing.error()));
+        }
+        let listing = String::from_utf8_lossy(&listing.stdout);
+        if listing.split_whitespace().next() != origin {
             return Ok(Push::Moved);
         }
         let remote: Vec<&str> = run

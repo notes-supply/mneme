@@ -417,3 +417,53 @@ fn init_refuses_a_folder_with_files_that_is_not_a_repository() {
         "# Notes\n"
     );
 }
+
+/// The server's main moves while the push is being checked, as when two machines push at once:
+/// the server's own hook moves it to a commit made elsewhere, the first time it runs. The push
+/// loses the race, which is normal, so the next tick replays onto the new main and pushes.
+#[test]
+fn a_push_that_loses_a_race_on_the_server_is_tried_again() {
+    let mut wiki = Wiki::new();
+    let repo = wiki.server.repo().to_owned();
+    let other = TempDir::new().unwrap();
+    let header = format!("http.extraHeader=Authorization: Bearer {}", MACHINES[0].1);
+    let url = wiki.server.git_url();
+    wiki.git
+        .ok(other.path(), &["-c", &header, "clone", "-q", &url, "."]);
+    fs::write(
+        other.path().join("page-9.md"),
+        "# Page 9\n\nwritten elsewhere\n",
+    )
+    .unwrap();
+    wiki.git
+        .ok(other.path(), &["commit", "-q", "-am", "Edit elsewhere"]);
+    let other_path = other.path().to_str().unwrap().to_owned();
+    wiki.git
+        .ok(&repo, &["fetch", "-q", &other_path, "main:refs/raced"]);
+    let hook = format!(
+        "#!/bin/sh\nif [ ! -e raced ]; then\n  touch raced\n  \
+         env -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+         git update-ref refs/heads/main refs/raced\nfi\nexec '{}' hook pre-receive\n",
+        env!("CARGO_BIN_EXE_mneme")
+    );
+    fs::write(repo.join("hooks/pre-receive"), hook).unwrap();
+
+    wiki.write("page-3.md", "# Page 3\n\nwritten here\n");
+    let first = wiki.tick();
+    assert!(
+        !matches!(first, Outcome::Blocked(_)),
+        "losing a race is not a refusal: {first:?}"
+    );
+    assert!(repo.join("raced").exists(), "the race happened");
+    assert_eq!(
+        wiki.tick(),
+        Outcome::Pushed,
+        "the next tick replays and pushes"
+    );
+    assert_eq!(wiki.server_head(), wiki.head());
+    let page = wiki.ok(&["show", "HEAD:page-9.md"]);
+    assert_eq!(
+        page, "# Page 9\n\nwritten elsewhere\n",
+        "the other machine's edit is kept"
+    );
+}
