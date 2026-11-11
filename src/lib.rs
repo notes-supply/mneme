@@ -4,6 +4,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+pub mod markdown;
+pub mod text;
+
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
