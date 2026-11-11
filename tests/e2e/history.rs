@@ -229,4 +229,28 @@ fn changes_list_every_event_newest_first() {
     let since = git::START + 6 * 600;
     let recent = server.json(&format!("/v1/changes?since={since}"));
     assert_eq!(recent["total"], 4);
+    let older = server.json(&format!("/v1/changes?before={since}"));
+    assert_eq!(
+        older["total"], 9,
+        "before leaves out the events at its time"
+    );
+    let times = |listing: &Value| -> Vec<i64> {
+        listing["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["time"].as_i64().unwrap())
+            .collect()
+    };
+    assert!(times(&older).iter().all(|&time| time < since));
+    let until = git::START + 8 * 600;
+    let window = server.json(&format!("/v1/changes?since={since}&before={until}"));
+    assert_eq!(times(&window), [git::START + 7 * 600, since]);
+    let alpha = live_page(&server, "greek/alpha.md");
+    let id = alpha["id"].as_str().unwrap();
+    let early = server.json(&format!("/v1/pages/{id}/versions?before={since}"));
+    assert_eq!(
+        early["total"], 3,
+        "created, edited and moved before the sixth commit"
+    );
 }

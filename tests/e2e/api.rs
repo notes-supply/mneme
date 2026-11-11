@@ -188,6 +188,7 @@ fn bad_parameters_are_400_with_a_message() {
         "/v1/pages?limit=-1",
         "/v1/search",
         "/v1/changes?since=x",
+        "/v1/changes?before=x",
     ] {
         let reply = server.get(path);
         assert_eq!(reply.status, 400, "{path}");

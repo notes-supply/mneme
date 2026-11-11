@@ -143,6 +143,7 @@ struct Paging {
     limit: Option<u32>,
     offset: Option<u32>,
     since: Option<i64>,
+    before: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -266,6 +267,7 @@ async fn versions(
             index.events(
                 Some(&id),
                 paging.since,
+                paging.before,
                 limit(paging.limit),
                 paging.offset.unwrap_or(0),
             )
@@ -324,6 +326,7 @@ async fn changes(
             index.events(
                 None,
                 paging.since,
+                paging.before,
                 limit(paging.limit),
                 paging.offset.unwrap_or(0),
             )

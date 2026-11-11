@@ -282,8 +282,8 @@ impl Index {
         })
     }
 
-    /// Events newest first, of one page or of all, at or after `since`, and how many there are
-    /// in all.
+    /// Events newest first, of one page or of all, at or after `since` and before `before`, and
+    /// how many there are in all.
     ///
     /// # Errors
     ///
@@ -292,24 +292,26 @@ impl Index {
         &self,
         page: Option<&PageId>,
         since: Option<i64>,
+        before: Option<i64>,
         limit: u32,
         offset: u32,
     ) -> Result<(u32, Vec<Version>)> {
         let page = page.map(PageId::as_str);
-        let filter = "WHERE (?1 IS NULL OR p.id = ?1) AND (?2 IS NULL OR c.time >= ?2)";
+        let filter = "WHERE (?1 IS NULL OR p.id = ?1) AND (?2 IS NULL OR c.time >= ?2) \
+                      AND (?3 IS NULL OR c.time < ?3)";
         let total = self.db.query_row(
             &format!(
                 "SELECT count(*) FROM versions v JOIN commits c ON c.seq = v.commit_seq \
                  JOIN pages p ON p.rowid = v.page {filter}"
             ),
-            params![page, since],
+            params![page, since, before],
             |row| row.get(0),
         )?;
         let mut statement = self.db.prepare_cached(&format!(
-            "{VERSION_SELECT} {filter} ORDER BY v.seq DESC LIMIT ?3 OFFSET ?4"
+            "{VERSION_SELECT} {filter} ORDER BY v.seq DESC LIMIT ?4 OFFSET ?5"
         ))?;
         let events = statement
-            .query_map(params![page, since, limit, offset], version_row)?
+            .query_map(params![page, since, before, limit, offset], version_row)?
             .collect::<Result<_, _>>()?;
         Ok((total, events))
     }

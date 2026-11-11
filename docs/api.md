@@ -45,7 +45,7 @@ Example: [`page.json`](../tests/fixtures/api/page.json).
 
 ## `GET /v1/pages/{id}/versions`
 
-The page's events, newest first, as `{ "total", "events": [Event] }`. Parameters are `limit`, `offset` and `since` (a time; only events at or after it).
+The page's events, newest first, as `{ "total", "events": [Event] }`. Parameters are `limit`, `offset`, `since` (a time; only events at or after it) and `before` (a time; only events older than it). Both together give a window.
 
 An `Event` has `commit`, `page`, `path` (after the event), `time`, `author` (the commit's author name), `kind` (`created`, `edited`, `renamed` or `deleted`), `from` (the old path, only for `renamed`), `version`, `words` (after the event), `added`, `removed`, `overlap` and `overlap_author`. A rename that also changes the text is one `renamed` event with `"version": true`. A deletion removes all the page's words. `overlap` is the value of an `Overlap:` trailer in the commit message, which the autosave service writes when it had to pick a side, or `null`. It names the commit of the edit that lost. `overlap_author` is that commit's author name, or `null` when `overlap` is `null` or names no commit on `main`.
 
@@ -74,7 +74,7 @@ Example: [`diff.json`](../tests/fixtures/api/diff.json).
 
 ## `GET /v1/changes`
 
-Events across all pages, newest first, as `{ "total", "events": [Event] }`. Parameters are `limit`, `offset` and `since`.
+Events across all pages, newest first, as `{ "total", "events": [Event] }`. Parameters are `limit`, `offset`, `since` and `before`, as for a page's versions. A client that pages back through time asks for `before` the oldest `time` it has. Several events can share one time, so it then drops the events it already holds.
 
 Example: [`changes.json`](../tests/fixtures/api/changes.json).
 

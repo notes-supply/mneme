@@ -15,7 +15,7 @@ Choices made while building Mneme that the design brief left open or that differ
 - **Word counts are of the Markdown**, as in the wiki viewer, so `#` and link targets count as words.
 - **A page over the markup budget** has its file name as its title, because finding its heading would need the parse the budget avoids.
 - **A deletion is an event with `removed` set to the page's words.** It is not a version, so the windows, which count versions, leave it out.
-- **Times are seconds since the Unix epoch.** `since` takes the same.
+- **Times are seconds since the Unix epoch.** `since` and `before` take the same. `since` keeps the events at its time and `before` leaves them out, so two windows that meet at one time never hold an event twice.
 - **Commits in the API are full ids** of commits on `main`. A commit between two events of a page shows the text the earlier event left.
 
 ## API
