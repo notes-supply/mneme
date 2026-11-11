@@ -17,10 +17,21 @@ The tokens file maps each machine's name to the SHA-256 of its token. The server
 
 The reading API is described in [docs/api.md](docs/api.md).
 
+## Autosave
+
+Each writer's machine runs `mneme autosave` on its wiki folder. Writers only edit files. The service commits what has been still for 15 seconds, fetches, replays its commits on top of the server's, and pushes, every few seconds and without ever waiting for a person. Where two machines changed the same lines, the later one keeps its own text and marks its commit with an `Overlap:` trailer. It waits instead when the folder is in the middle of a Git operation it did not start, and stops saving when a save would delete most pages.
+
+```sh
+mneme autosave init --folder ~/wiki --server https://host --token-file ~/.config/mneme/token --name blackbox
+mneme autosave run  --folder ~/wiki --server https://host --token-file ~/.config/mneme/token --name blackbox
+```
+
+`init` clones into a missing or empty folder, or checks an existing clone. [deploy/mneme-autosave.service](deploy/mneme-autosave.service) runs the service as a systemd user unit. It reports its state to the server, which lists every machine on `/v1/machines`.
+
 ## Check it
 
 ```sh
 mise run gate
 ```
 
-The gate checks formatting, runs clippy with warnings denied, runs the tests with nextest, checks the RustSec advisories, and lints the CI workflow. CI runs the same command. Set `MISE_OFFLINE=1` to check the advisories against the local copy of the database without fetching it.
+The gate checks formatting, runs clippy with warnings denied, runs the tests with nextest, checks the RustSec advisories, and lints the CI workflow. Its tests include a simulation of three clones and a server over 128 seeds. `mise run soak` runs 2000. CI runs the same command. Set `MISE_OFFLINE=1` to check the advisories against the local copy of the database without fetching it.
