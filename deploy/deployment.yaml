@@ -60,6 +60,9 @@ spec:
               path: /healthz
               port: http
             periodSeconds: 20
+          # Measured on kind with a one-page wiki: 0.1m CPU and 6 MiB at rest; serving Atrium's
+          # reads at 440 pages a second plus a clone and a push every 2s, 343m CPU and a 15 MiB
+          # peak. The index and git's pack work grow with history, so the limit keeps headroom.
           resources:
             requests:
               cpu: 10m
