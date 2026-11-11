@@ -27,7 +27,7 @@ const START: u64 = 1_800_000_000;
 /// Port 9 is discard, which nothing on the test machine listens on.
 const UNREACHABLE: &str = "http://127.0.0.1:9/git/wiki.git";
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-const GATE_SEEDS: u64 = 64;
+const GATE_SEEDS: u64 = 128;
 const GATE_STEPS: usize = 80;
 
 fn env_number<T: std::str::FromStr>(name: &str) -> Option<T> {
