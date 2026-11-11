@@ -75,6 +75,29 @@ impl Work {
         work
     }
 
+    /// A clone of `url` that sends `header` on every request.
+    pub fn clone_from(url: &str, header: &str) -> Self {
+        let work = Self {
+            dir: TempDir::new().unwrap(),
+            git: Isolation::new(),
+            clock: Cell::new(START),
+        };
+        let extra = format!("http.extraHeader={header}");
+        work.git
+            .ok(work.path(), &["-c", &extra, "clone", "-q", url, "."]);
+        work.ok(&["config", "http.extraHeader", header]);
+        work
+    }
+
+    /// Pushes, and returns whether it worked and what Git said.
+    pub fn push(&self, args: &[&str]) -> (bool, String) {
+        let output = self.git.git(self.path(), &[&["push"], args].concat());
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    }
+
     pub fn path(&self) -> &Path {
         self.dir.path()
     }
@@ -85,6 +108,27 @@ impl Work {
 
     pub fn ok(&self, args: &[&str]) -> String {
         self.git.ok(self.path(), args)
+    }
+
+    /// Runs `git` with `input` on standard input and returns its standard output.
+    pub fn git_stdin(&self, args: &[&str], input: &str) -> String {
+        use std::io::Write as _;
+        let mut child = self
+            .git
+            .apply(Command::new("git").current_dir(self.path()).args(args))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout).unwrap()
     }
 
     pub fn write(&self, path: &str, text: &str) {

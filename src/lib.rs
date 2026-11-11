@@ -7,6 +7,9 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 
 pub mod api;
+pub mod auth;
+pub mod git_http;
+pub mod hook;
 pub mod index;
 pub mod log;
 pub mod markdown;
@@ -25,6 +28,17 @@ struct Cli {
 enum Command {
     /// Serve the repository over HTTPS and the reading API.
     Serve(serve::Args),
+    /// Run a Git hook. The server installs it in the repository.
+    Hook {
+        #[command(subcommand)]
+        hook: Hook,
+    },
+}
+
+#[derive(Subcommand)]
+enum Hook {
+    /// Refuse a push that would break the wiki's rules.
+    PreReceive,
 }
 
 /// Runs the command named on the command line.
@@ -33,6 +47,9 @@ pub fn main() -> ExitCode {
         Command::Serve(args) => tokio::runtime::Runtime::new()
             .map_err(anyhow::Error::from)
             .and_then(|runtime| runtime.block_on(serve::run(args))),
+        Command::Hook {
+            hook: Hook::PreReceive,
+        } => return hook::pre_receive(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

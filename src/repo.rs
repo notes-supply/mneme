@@ -152,8 +152,14 @@ fn commit(repo: &gix::Repository, id: ObjectId) -> Result<Commit> {
     })
 }
 
+/// Whether a file at `path` is a page. Other files are stored by Git and not indexed.
+#[must_use]
+pub fn is_page(path: &[u8]) -> bool {
+    path.ends_with(b".md")
+}
+
 fn page(location: &BStr, mode: EntryMode) -> Option<String> {
-    (mode.is_blob() && location.ends_with(b".md")).then(|| location.to_string())
+    (mode.is_blob() && is_page(location)).then(|| location.to_string())
 }
 
 /// The change to page files, seen from what was a page before and what is a page after.
