@@ -327,6 +327,28 @@ fn a_body_over_64_mib_is_refused() {
 }
 
 #[test]
+fn a_streamed_push_over_64_mib_fails_and_the_server_stays_healthy() {
+    let (server, work) = wiki();
+    let before = head(&server);
+    work.write("big.bin", &"a".repeat((64 << 20) + (1 << 20)));
+    work.ok(&["config", "core.compression", "0"]);
+    work.ok(&["add", "big.bin"]);
+    work.ok(&["commit", "-q", "-m", "Add a large file"]);
+    let (ok, said) = work.push(&["origin", "main"]);
+    assert!(!ok, "the push was accepted: {said}");
+    assert_eq!(head(&server), before, "main did not move");
+    server.log_with("the request body is over 67108864 bytes");
+
+    assert_eq!(server.get("/healthz").body, "ok");
+    work.ok(&["reset", "-q", "--hard", "HEAD~"]);
+    work.write("index.md", "# Home\n\nAfter the large push.\n");
+    let commit = work.commit("Say more");
+    let (ok, said) = work.push(&["origin", "main"]);
+    assert!(ok, "{said}");
+    assert_eq!(head(&server), commit.as_str());
+}
+
+#[test]
 fn sigterm_stops_the_server() {
     let (server, _work) = wiki();
     assert_eq!(server.get("/healthz").body, "ok");
