@@ -5,8 +5,13 @@ edition = "2024"
 publish = false
 
 [dependencies]
+anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 comrak = { version = "0.59.0", default-features = false }
+gix = { version = "0.90.0", default-features = false, features = ["sha1", "blob-diff"] }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.11.1"
 similar = { version = "3.2.1", features = ["inline"] }
 
 [lints.rust]
@@ -25,6 +30,9 @@ expect_used = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+
+[dev-dependencies]
+tempfile = "3.27.0"
 
 [profile.release]
 lto = "thin"

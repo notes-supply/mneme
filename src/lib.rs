@@ -4,7 +4,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+pub mod index;
 pub mod markdown;
+pub mod repo;
 pub mod text;
 
 #[derive(Parser)]
