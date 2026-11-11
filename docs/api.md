@@ -12,7 +12,7 @@ Each route has one example response in `tests/fixtures/api/`. The tests check ev
 - **Versions.** A version is a commit that changed a page's text. Events also include renames that keep the text and deletions. Those have `"version": false`.
 - **Paging.** `limit` defaults to 50 and is capped at 500. `offset` defaults to 0. A paged answer has `total`, the number of items across all pages.
 - **ETag.** Every response has a strong `ETag`, the hash of its body. A request with a matching `If-None-Match` gets `304` with no body.
-- **Errors** are `{ "error": "..." }`: `400` for parameters that do not parse and for a search that cannot be read, `404` for an unknown route, page or commit, or a page with no text at a commit.
+- **Errors** are `{ "error": "..." }`: `400` for parameters that do not parse and for a search that cannot be read, `404` for an unknown route, page, commit or path, or a page with no text at a commit.
 
 ## `GET /v1/status`
 
@@ -87,6 +87,12 @@ A writer leaves a question as a list item under a heading named "Open questions"
 A `Question` has `page`, which is `{ "id", "path", "title" }`, `text`, the item's visible text on one line, and `updated`, the page's `updated`. A page with very much markup, which search reads as raw Markdown, has no questions.
 
 Example: [`questions.json`](../tests/fixtures/api/questions.json).
+
+## `GET /v1/paths/{path}`
+
+The page for a path, as `{ "id", "path", "current" }`. The path may hold slashes and must match exactly. When a live page is at the path, that is the page and `current` is `true`. Otherwise it is the page that most recently had the path and is not deleted, with the path it has now and `"current": false`, so a link written before a rename still finds its page. `404` when no page that is not deleted has had the path.
+
+Example: [`path.json`](../tests/fixtures/api/path.json).
 
 ## `GET /v1/search?q=`
 

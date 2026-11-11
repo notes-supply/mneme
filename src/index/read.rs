@@ -22,6 +22,8 @@ pub enum Missing {
     Commit,
     #[error("the page has no text at this commit")]
     Text,
+    #[error("no page that is not deleted has had this path")]
+    Path,
 }
 
 /// Which page a question is on.
@@ -39,6 +41,16 @@ pub struct Question {
     pub text: String,
     /// When the page last changed.
     pub updated: i64,
+}
+
+/// The page found for a path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PathMatch {
+    pub id: PageId,
+    /// The page's path now.
+    pub path: String,
+    /// Whether the page is at the path asked for now.
+    pub current: bool,
 }
 
 /// The order of a page listing.
@@ -245,6 +257,29 @@ impl Index {
             })?
             .collect::<Result<_, _>>()?;
         Ok((total, questions))
+    }
+
+    /// The live page at `path`, or else the page that most recently had it and is not deleted.
+    ///
+    /// # Errors
+    ///
+    /// [`Missing::Path`] when no page that is not deleted ever had the path.
+    pub fn path(&self, path: &str) -> Result<PathMatch> {
+        let found = self
+            .db
+            .query_row(
+                "SELECT p.id, p.path FROM versions v JOIN pages p ON p.rowid = v.page \
+                 WHERE v.path = ?1 AND p.deleted IS NULL ORDER BY v.seq DESC LIMIT 1",
+                [path],
+                |row| Ok((PageId(row.get(0)?), row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let (id, now) = found.ok_or(Missing::Path)?;
+        Ok(PathMatch {
+            current: now == path,
+            id,
+            path: now,
+        })
     }
 
     /// Events newest first, of one page or of all, at or after `since`, and how many there are

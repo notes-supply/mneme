@@ -17,8 +17,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::index::{
-    Filter, Hit, Listing, Missing, Order, Page, PageId, QueryError, Question, Sort, Status,
-    Version, Window,
+    Filter, Hit, Listing, Missing, Order, Page, PageId, PathMatch, QueryError, Question, Sort,
+    Status, Version, Window,
 };
 use crate::machines::Health;
 use crate::serve::Wiki;
@@ -39,6 +39,7 @@ pub fn router(wiki: Arc<Wiki>) -> Router {
         .route("/v1/pages/{id}/diff", get(diff))
         .route("/v1/changes", get(changes))
         .route("/v1/questions", get(questions))
+        .route("/v1/paths/{*path}", get(path))
         .route("/v1/search", get(search))
         .route("/v1/machines", get(machines))
         .fallback(|| async { ApiError::NotFound("no such route".to_owned()) })
@@ -339,6 +340,13 @@ async fn questions(
         .read(move |_, index| index.questions(limit(slice.limit), slice.offset.unwrap_or(0)))
         .await?;
     Ok(Json(QuestionsBody { total, questions }))
+}
+
+async fn path(
+    State(wiki): State<Arc<Wiki>>,
+    Path(path): Path<String>,
+) -> Result<Json<PathMatch>, ApiError> {
+    wiki.read(move |_, index| index.path(&path)).await.map(Json)
 }
 
 async fn search(

@@ -14,7 +14,7 @@ mod apply;
 mod read;
 mod search;
 
-pub use read::{Diff, End, Filter, Listing, Missing, Order, Question, Sort, Window};
+pub use read::{Diff, End, Filter, Listing, Missing, Order, PathMatch, Question, Sort, Window};
 pub use search::{Hit, Mark, Query, QueryError};
 
 /// Stable id of a page across renames: a hash of the path it was created at and the commit

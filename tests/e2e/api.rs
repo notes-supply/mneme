@@ -296,6 +296,63 @@ fn open_questions_are_listed_newest_page_first_and_then_in_page_order() {
     assert_eq!(trip["page"]["questions"], 2);
 }
 
+fn found(server: &Server, path: &str) -> (String, bool) {
+    let found = server.json(&format!("/v1/paths/{path}"));
+    (
+        found["path"].as_str().unwrap().to_owned(),
+        found["current"].as_bool().unwrap(),
+    )
+}
+
+#[test]
+fn a_page_is_found_by_any_path_it_has_had() {
+    let work = git::standard();
+    let server = Server::of(&work);
+    let alpha = live_page(&server, "greek/alpha.md");
+    assert_eq!(
+        found(&server, "greek/alpha.md"),
+        ("greek/alpha.md".to_owned(), true)
+    );
+    assert_eq!(
+        found(&server, "alpha.md"),
+        ("greek/alpha.md".to_owned(), false)
+    );
+    assert_eq!(server.json("/v1/paths/alpha.md")["id"], alpha["id"]);
+    assert_eq!(
+        found(&server, "gotl%C3%A4ndska%20minnen.md"),
+        ("minnen från gotland.md".to_owned(), false)
+    );
+    let deep = live_page(&server, "notes/deep.md");
+    assert_eq!(server.json("/v1/paths/notes/deep.md")["id"], deep["id"]);
+    let missing = server.get("/v1/paths/nowhere.md");
+    assert_eq!(missing.status, 404);
+    assert_eq!(
+        missing.json()["error"],
+        "no page that is not deleted has had this path"
+    );
+}
+
+#[test]
+fn a_path_whose_pages_are_deleted_finds_the_last_live_one_or_nothing() {
+    let work = Work::new();
+    work.write("old.md", "# Old\n\nThe first page at old.md.\n");
+    work.write("gone.md", "# Gone\n\nSoon deleted.\n");
+    work.commit("Start");
+    work.rename("old.md", "moved.md");
+    work.remove("gone.md");
+    work.commit("Move and delete");
+    work.write(
+        "old.md",
+        "# Second\n\nA second page at old.md, deleted later.\n",
+    );
+    work.commit("Reuse the path");
+    work.remove("old.md");
+    work.commit("Delete the second page");
+    let server = Server::of(&work);
+    assert_eq!(found(&server, "old.md"), ("moved.md".to_owned(), false));
+    assert_eq!(server.get("/v1/paths/gone.md").status, 404);
+}
+
 fn search_wiki() -> Work {
     let work = Work::new();
     work.write(
@@ -499,6 +556,7 @@ fn every_route_answers_in_the_shape_of_its_example_file() {
         ("changes", "/v1/changes".to_owned()),
         ("search", "/v1/search?q=harbours".to_owned()),
         ("questions", "/v1/questions".to_owned()),
+        ("path", "/v1/paths/alpha.md".to_owned()),
         ("machines", "/v1/machines".to_owned()),
     ];
     for (name, path) in routes {

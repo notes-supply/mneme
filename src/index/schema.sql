@@ -39,6 +39,8 @@ CREATE TABLE versions (
 
 CREATE INDEX versions_page ON versions (page, seq);
 
+CREATE INDEX versions_path ON versions (path, seq);
+
 CREATE TABLE questions (
     page INTEGER NOT NULL REFERENCES pages (rowid),
     position INTEGER NOT NULL,
