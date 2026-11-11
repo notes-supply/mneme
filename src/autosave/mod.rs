@@ -131,6 +131,8 @@ struct State {
     refreshed: Option<String>,
     /// A head the server's push check refused, with its reason.
     refused: Option<(String, String)>,
+    /// A head the folder could not move from, and the left-out paths the server changed.
+    stuck: Option<(Option<String>, Vec<Vec<u8>>)>,
     /// New files whose names Git would not stage, so that a save does not try them each tick.
     unstorable: HashSet<Vec<u8>>,
     /// The last report the server took, and when.
@@ -161,6 +163,8 @@ enum Move {
     Done(String),
     /// An edit in the folder is in the way, so nothing moved.
     Waiting,
+    /// The server changed these files, which the service leaves out, so nothing moved.
+    Stuck(Vec<Left>),
     /// Commits kept landing on `main` while the folder moved, for this reason.
     Blocked(String),
 }
@@ -269,6 +273,16 @@ impl Autosave {
             && head.as_ref() == Some(refused)
         {
             blocked = Some(reason.clone());
+        } else if let Some((at, paths)) = &self.state.stuck
+            && *at == head
+        {
+            let still: Vec<&Left> = left
+                .iter()
+                .filter(|left| paths.contains(&left.path))
+                .collect();
+            if !still.is_empty() {
+                blocked = Some(stuck_reason(&still));
+            }
         }
         self.state.last_head.clone_from(&head);
         let outcome = match (stopped, blocked, &self.state.offline) {
@@ -459,6 +473,7 @@ impl Autosave {
         progress: &mut Progress,
         pending: bool,
     ) -> Result<Option<String>> {
+        self.state.stuck = None;
         let origin = self.origin()?;
         let ahead = match self.shape(head.as_deref(), origin.as_deref())? {
             Shape::Same => false,
@@ -476,6 +491,12 @@ impl Autosave {
                         ahead
                     }
                     Move::Waiting => return Ok(None),
+                    Move::Stuck(left) => {
+                        let reason = stuck_reason(&left.iter().collect::<Vec<_>>());
+                        let paths = left.into_iter().map(|left| left.path).collect();
+                        self.state.stuck = Some((head.clone(), paths));
+                        return Ok(Some(reason));
+                    }
                     Move::Blocked(reason) => return Ok(Some(reason)),
                 }
             }
@@ -558,10 +579,16 @@ impl Autosave {
                         run.error()
                     )));
                 }
-                if Folder::read(&self.git)?.clean() {
+                let folder = Folder::read(&self.git)?;
+                if folder.clean() {
                     bail!("git read-tree -m -u failed: {}", run.error());
                 }
-                return Ok(Move::Waiting);
+                let stuck = self.left_in_the_way(&folder, base, &target)?;
+                return Ok(if stuck.is_empty() {
+                    Move::Waiting
+                } else {
+                    Move::Stuck(stuck)
+                });
             }
             let old = expected.as_deref().unwrap_or(git::NO_OBJECT);
             let args = [
@@ -591,6 +618,34 @@ impl Autosave {
             "commits kept landing on main as the folder moved; the last was {}",
             expected.unwrap_or_default()
         )))
+    }
+
+    /// The files the service leaves out at paths that differ between `from` and `to`. Git's
+    /// two-way merge refuses to overwrite them, and no save will ever take them, so the folder
+    /// cannot move until a person fixes them.
+    fn left_in_the_way(&self, folder: &Folder, from: &str, to: &str) -> Result<Vec<Left>> {
+        let changed = self.git.ok(&[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "--no-renames",
+            from,
+            to,
+        ])?;
+        let changed: Vec<&[u8]> = changed
+            .split(|&b| b == 0)
+            .filter(|path| !path.is_empty())
+            .collect();
+        Ok(save::left(folder)
+            .into_iter()
+            .filter(|left| {
+                changed.iter().any(|path| {
+                    *path == left.path
+                        || (left.path.ends_with(b"/") && path.starts_with(&left.path))
+                })
+            })
+            .collect())
     }
 
     /// The commits on `main` at `now` that are neither in `before` nor on the server, oldest
@@ -710,4 +765,19 @@ impl Autosave {
             self.state.reported = Some((report, now));
         }
     }
+}
+
+/// Why the folder cannot take the server's changes, naming each left-out file in the way.
+fn stuck_reason(left: &[&Left]) -> String {
+    let mut left = left.to_vec();
+    left.sort_by(|a, b| a.path.cmp(&b.path));
+    let files: Vec<String> = left
+        .iter()
+        .map(|left| format!("{} ({})", String::from_utf8_lossy(&left.path), left.leave))
+        .collect();
+    format!(
+        "the server changed files the service leaves out, so the folder cannot take its \
+         changes until they are fixed: {}",
+        files.join(", ")
+    )
 }

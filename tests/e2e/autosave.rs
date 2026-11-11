@@ -448,6 +448,61 @@ fn a_tracked_page_that_turns_bad_keeps_its_last_good_version() {
     assert_eq!(wiki.reported()["skipped"], skipped(&bad[1..]));
 }
 
+/// When the server changes a page the folder leaves out, or adds a page where the folder has a
+/// file it leaves out, the folder cannot move without overwriting it. That needs a person, so
+/// the service says which files are in the way on every tick until they are fixed.
+#[test]
+fn a_clone_stuck_behind_a_left_out_file_is_blocked_until_it_is_fixed() {
+    let mut wiki = Wiki::new();
+    sparse(&wiki.path().join("page-3.md"), MAX_PAGE + 1);
+    std::os::unix::fs::symlink("page-1.md", wiki.path().join("new.md")).unwrap();
+    assert_eq!(wiki.tick(), Outcome::Idle);
+    let head = wiki.head();
+    wiki.push_from_elsewhere("page-3.md", "# Page 3\n\nfrom elsewhere\n");
+    wiki.push_from_elsewhere("new.md", "# New\n\nfrom elsewhere\n");
+    let both = "the server changed files the service leaves out, so the folder cannot take its \
+                changes until they are fixed: new.md (a symlink), page-3.md (a page over 1 MiB)";
+    assert_eq!(wiki.tick(), Outcome::Idle, "no fetch is due yet");
+    assert_eq!(wiki.tick(), Outcome::Blocked(both.to_owned()));
+    assert_eq!(
+        wiki.tick(),
+        Outcome::Blocked(both.to_owned()),
+        "a tick without a fetch still says so"
+    );
+    assert_eq!(wiki.head(), head);
+    assert_eq!(
+        fs::metadata(wiki.path().join("page-3.md")).unwrap().len(),
+        MAX_PAGE + 1
+    );
+    let reported = wiki.reported();
+    assert_eq!(reported["state"], "blocked");
+    assert_eq!(reported["detail"], both);
+    assert_eq!(
+        reported["skipped"],
+        skipped(&[
+            ("new.md".to_owned(), "a symlink"),
+            ("page-3.md".to_owned(), "a page over 1 MiB"),
+        ])
+    );
+
+    fs::remove_file(wiki.path().join("new.md")).unwrap();
+    let one = "the server changed files the service leaves out, so the folder cannot take its \
+               changes until they are fixed: page-3.md (a page over 1 MiB)";
+    assert_eq!(
+        wiki.tick(),
+        Outcome::Blocked(one.to_owned()),
+        "a fixed file is no longer named"
+    );
+    wiki.write("page-3.md", "# Page 3\n\nfixed here\n");
+    assert_eq!(wiki.tick(), Outcome::Pushed);
+    assert_eq!(wiki.server_head(), wiki.head());
+    assert!(wiki.ok(&["show", "HEAD:page-3.md"]).contains("fixed here"));
+    assert!(wiki.ok(&["show", "HEAD:new.md"]).contains("from elsewhere"));
+    assert!(wiki.ok(&["log", "-1", "--format=%B"]).contains("Overlap: "));
+    assert_eq!(wiki.tick(), Outcome::Idle);
+    assert_eq!(wiki.reported()["skipped"], json!([]));
+}
+
 /// A page that turns into a symlink after the service looked at it and before it staged it is
 /// left out all the same.
 #[test]
