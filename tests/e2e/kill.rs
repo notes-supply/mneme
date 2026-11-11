@@ -94,9 +94,11 @@ fn pages(dir: &Path) -> BTreeMap<String, String> {
     found
 }
 
-fn server_pages(git: &Isolation, server: &Server) -> Option<BTreeMap<String, String>> {
+/// The pages of the server's `head`, read from that one commit, since `main` can move between
+/// two reads while the services push.
+fn server_pages(git: &Isolation, server: &Server, head: &str) -> Option<BTreeMap<String, String>> {
     let repo = server.repo();
-    let listing = git.git(repo, &["ls-tree", "-r", "-z", "--name-only", "main"]);
+    let listing = git.git(repo, &["ls-tree", "-r", "-z", "--name-only", head]);
     if !listing.status.success() {
         return None;
     }
@@ -106,7 +108,7 @@ fn server_pages(git: &Isolation, server: &Server) -> Option<BTreeMap<String, Str
             .split('\0')
             .filter(|name| !name.is_empty())
             .map(|name| {
-                let text = git.ok(repo, &["cat-file", "blob", &format!("main:{name}")]);
+                let text = git.ok(repo, &["cat-file", "blob", &format!("{head}:{name}")]);
                 (name.to_owned(), text)
             })
             .collect(),
@@ -193,7 +195,7 @@ fn wait_until_settled(
     loop {
         let head = git.git(server.repo(), &["rev-parse", "main"]);
         let head = String::from_utf8(head.stdout).unwrap();
-        let settled = server_pages(git, server).as_ref() == Some(union)
+        let settled = server_pages(git, server, head.trim()).as_ref() == Some(union)
             && folders.iter().all(|(folder, _)| {
                 pages(folder) == *union
                     && git.ok(folder, &["rev-parse", "HEAD"]) == head
@@ -205,7 +207,7 @@ fn wait_until_settled(
         assert!(
             Instant::now() < deadline,
             "seed {seed}: the folders did not settle. Server: {:?}, expected {union:?}",
-            server_pages(git, server)
+            server_pages(git, server, head.trim())
         );
         thread::sleep(Duration::from_millis(100));
     }
