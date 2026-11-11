@@ -366,8 +366,7 @@ async fn search(
 }
 
 async fn machines(State(wiki): State<Arc<Wiki>>) -> Result<Json<MachinesBody>, ApiError> {
-    let head = wiki.read(|_, index| Ok(index.status()?.head)).await?;
-    let machines = wiki.machines().list(head.as_deref());
+    let machines = wiki.machines().list();
     Ok(Json(MachinesBody {
         total: machines.len(),
         machines,

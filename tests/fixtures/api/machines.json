@@ -1,6 +1,7 @@
 {
   "machines": [
     {
+      "behind_since": null,
       "current": false,
       "detail": null,
       "head": null,
@@ -12,12 +13,13 @@
       "state": null
     },
     {
+      "behind_since": null,
       "current": true,
       "detail": "a merge is in progress",
       "head": "091c7c8d41d3aa667984fcdd6880d4c93ed9f016",
       "name": "blackbox",
-      "reported": 1794415021,
-      "seen": 1794415021,
+      "reported": 1794415680,
+      "seen": 1794415680,
       "skipped": [
         {
           "path": "notes/scan.pdf",
@@ -28,15 +30,16 @@
       "state": "blocked"
     },
     {
+      "behind_since": 1794415680,
       "current": false,
-      "detail": null,
-      "head": null,
+      "detail": "",
+      "head": "6e9caa1d0cba4f91b2332a5126fa0d38ff39e6ff",
       "name": "cassia",
-      "reported": null,
+      "reported": 1794415680,
       "seen": null,
-      "skipped": null,
-      "skipped_more": null,
-      "state": null
+      "skipped": [],
+      "skipped_more": 0,
+      "state": "idle"
     }
   ],
   "total": 3

@@ -165,6 +165,12 @@ impl Index {
         Ok(commits.len())
     }
 
+    /// The last commit on `main` that the index holds.
+    #[must_use]
+    pub fn head(&self) -> Option<String> {
+        self.head.map(|head| head.to_string())
+    }
+
     /// Head commit, page and commit counts and the build time.
     ///
     /// # Errors

@@ -329,3 +329,99 @@ fn an_unreadable_state_file_means_no_machine_seen() {
     assert_eq!(lines[0]["loaded"], 0);
     assert!(lines[0]["error"].is_string(), "{lines:?}");
 }
+
+fn behind_since(server: &Server, name: &str) -> Value {
+    machine(server, name)["behind_since"].clone()
+}
+
+fn report_head(server: &Server, name: &str, head: &str) {
+    let body = json!({
+        "state": "idle", "detail": "", "head": head, "skipped": [], "skipped_more": 0,
+    })
+    .to_string();
+    let reply = send(server, Some(&bearer(name)), &body);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+}
+
+#[test]
+fn a_machine_is_behind_from_when_its_head_first_differed() {
+    let git = Isolation::new();
+    let server = Server::empty(&git);
+    let work = clone_as(&server, "blackbox");
+    work.write("index.md", "# Home\n");
+    work.commit("Start");
+    let (ok, said) = work.push(&["origin", "main"]);
+    assert!(ok, "{said}");
+    let first = server_head(&server);
+    assert_eq!(
+        behind_since(&server, "blackbox"),
+        Value::Null,
+        "never reported"
+    );
+    report_head(&server, "blackbox", &first);
+    assert_eq!(
+        behind_since(&server, "blackbox"),
+        Value::Null,
+        "the same head"
+    );
+    assert_eq!(machine(&server, "blackbox")["current"], true);
+
+    let pushed = now();
+    let other = clone_as(&server, "aeolus");
+    other.write("index.md", "# Home\n\nFrom aeolus.\n");
+    other.commit("Edit");
+    let (ok, said) = other.push(&["origin", "main"]);
+    assert!(ok, "{said}");
+    let since = behind_since(&server, "blackbox").as_i64().unwrap();
+    assert!(
+        (pushed..=now()).contains(&since),
+        "set by the push: {since}"
+    );
+    assert_eq!(machine(&server, "blackbox")["current"], false);
+    assert_eq!(
+        behind_since(&server, "aeolus"),
+        Value::Null,
+        "aeolus never reported"
+    );
+
+    thread::sleep(Duration::from_millis(1100));
+    report_head(&server, "blackbox", &first);
+    assert_eq!(
+        behind_since(&server, "blackbox"),
+        since,
+        "a report of the same old head keeps the first time"
+    );
+    let (_, _, server) = server.restart(&git);
+    assert_eq!(
+        behind_since(&server, "blackbox"),
+        since,
+        "kept across a restart"
+    );
+
+    let second = server_head(&server);
+    report_head(&server, "blackbox", &second);
+    assert_eq!(
+        behind_since(&server, "blackbox"),
+        Value::Null,
+        "cleared by a match"
+    );
+
+    work.ok(&["remote", "set-url", "origin", &server.git_url()]);
+    work.ok(&["pull", "-q", "--ff-only"]);
+    work.write("local.md", "# Not pushed\n");
+    let local = work.commit("Not pushed yet");
+    let reported = now();
+    report_head(&server, "blackbox", &local);
+    let ahead = behind_since(&server, "blackbox").as_i64().unwrap();
+    assert!(
+        (reported..=now()).contains(&ahead),
+        "a report of a head that is not the server's sets it: {ahead}"
+    );
+    let (ok, said) = work.push(&["origin", "main"]);
+    assert!(ok, "{said}");
+    assert_eq!(
+        behind_since(&server, "blackbox"),
+        Value::Null,
+        "the push made the server's head the reported one"
+    );
+}

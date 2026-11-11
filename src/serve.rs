@@ -21,9 +21,9 @@ use crate::auth::Tokens;
 use crate::git_http::{self, Machine};
 use crate::git_version;
 use crate::index::Index;
-use crate::log;
 use crate::machines::Machines;
 use crate::repo::Repo;
+use crate::{log, now};
 
 /// The longest a change to the machines' state waits before it is written.
 const SAVE_EVERY: Duration = Duration::from_secs(3);
@@ -63,7 +63,8 @@ impl Wiki {
         &self.machines
     }
 
-    /// Adds new commits on main to the index. Returns how many there were.
+    /// Adds new commits on main to the index, and compares every machine with the new head.
+    /// Returns how many commits there were.
     ///
     /// # Errors
     ///
@@ -72,7 +73,9 @@ impl Wiki {
         let wiki = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             let mut index = wiki.index.lock().unwrap_or_else(PoisonError::into_inner);
-            index.update(&Repo::open(&wiki.path)?)
+            let added = index.update(&Repo::open(&wiki.path)?)?;
+            wiki.machines.moved(index.head(), now());
+            Ok(added)
         })
         .await?
     }
@@ -117,6 +120,7 @@ pub async fn run(args: Args) -> Result<()> {
         );
         let index = Index::build(&Repo::open(&path)?)?;
         log::emit("indexed", json!(index.status()?));
+        machines.moved(index.head(), now());
         Ok(Wiki {
             path,
             index: Mutex::new(index),

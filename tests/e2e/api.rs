@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::git::{self, Work};
 use crate::history::{assert_versions_match_git, events, live_page};
@@ -544,6 +544,21 @@ fn every_route_answers_in_the_shape_of_its_example_file() {
                 AUTHORIZATION.trim_start_matches("Authorization: "),
             ),
             ("mneme-report", &report),
+        ],
+    );
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let behind = json!({
+        "state": "idle",
+        "detail": "",
+        "head": work.ok(&["rev-parse", "HEAD^"]).trim(),
+        "skipped": [],
+        "skipped_more": 0,
+    });
+    let reply = server.get_with(
+        "/git/wiki.git/info/refs?service=git-upload-pack",
+        &[
+            ("authorization", "Bearer test-token-of-cassia"),
+            ("mneme-report", &STANDARD.encode(behind.to_string())),
         ],
     );
     assert_eq!(reply.status, 200, "{}", reply.body);

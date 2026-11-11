@@ -136,6 +136,9 @@ pub struct Health {
     pub skipped_more: Option<usize>,
     /// Whether the reported head is the server's head.
     pub current: bool,
+    /// When the server's head and the reported head first differed, or `None` while they are
+    /// the same or the machine has not reported.
+    pub behind_since: Option<i64>,
 }
 
 /// What the server knows of one machine, as the state file holds it.
@@ -144,6 +147,23 @@ pub struct Health {
 struct Record {
     seen: Option<i64>,
     report: Option<Received>,
+    behind_since: Option<i64>,
+}
+
+impl Record {
+    /// Compares the reported head with the server's `head` at `now`. Returns whether
+    /// `behind_since` changed.
+    fn settle(&mut self, head: Option<&str>, now: i64) -> bool {
+        let behind = match &self.report {
+            Some(received) if received.report.head.as_deref() != head => {
+                Some(self.behind_since.unwrap_or(now))
+            }
+            _ => None,
+        };
+        let changed = behind != self.behind_since;
+        self.behind_since = behind;
+        changed
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -155,6 +175,8 @@ struct Received {
 
 struct State {
     records: BTreeMap<String, Record>,
+    /// The server's head, which every record is compared with.
+    head: Option<String>,
     /// Whether a record changed since the file was last written.
     changed: bool,
 }
@@ -189,6 +211,7 @@ impl Machines {
         Self {
             state: Mutex::new(State {
                 records,
+                head: None,
                 changed: false,
             }),
             file,
@@ -202,15 +225,31 @@ impl Machines {
 
     /// Keeps `report` as the latest from `name`, received at `now`.
     pub fn report(&self, name: &str, report: Report, now: i64) {
-        self.with(name, |record| {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let State { records, head, .. } = &mut *state;
+        if let Some(record) = records.get_mut(name) {
             record.report = Some(Received { at: now, report });
-        });
+            record.settle(head.as_deref(), now);
+            state.changed = true;
+        }
     }
 
-    /// Every machine by name, each compared with the server's `head`.
+    /// Notes that the server's head is `head` at `now`, after a push or at start.
+    pub fn moved(&self, head: Option<String>, now: i64) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut changed = false;
+        for record in state.records.values_mut() {
+            changed |= record.settle(head.as_deref(), now);
+        }
+        state.head = head;
+        state.changed |= changed;
+    }
+
+    /// Every machine by name, each compared with the server's head.
     #[must_use]
-    pub fn list(&self, head: Option<&str>) -> Vec<Health> {
+    pub fn list(&self) -> Vec<Health> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let head = state.head.as_deref();
         state
             .records
             .iter()
@@ -227,6 +266,7 @@ impl Machines {
                     head: reported_head,
                     skipped: report.map(|report| report.skipped.clone()),
                     skipped_more: report.map(|report| report.skipped_more),
+                    behind_since: record.behind_since,
                 }
             })
             .collect()
