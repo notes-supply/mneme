@@ -14,10 +14,10 @@
     {
       "current": true,
       "detail": "a merge is in progress",
-      "head": "faf510a1fb457f1af5496ca64dea77ed68ddb2f8",
+      "head": "b12a5a2410741129ca62e49bc619a2f8c4e746a6",
       "name": "blackbox",
-      "reported": 1794404809,
-      "seen": 1794404809,
+      "reported": 1794409986,
+      "seen": 1794409986,
       "skipped": [
         {
           "path": "notes/scan.pdf",

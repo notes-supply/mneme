@@ -16,6 +16,7 @@ struct PageText {
     words: u32,
     body: String,
     markdown: String,
+    questions: Vec<String>,
 }
 
 /// The live page at a path, as it was before the commit being applied.
@@ -36,6 +37,7 @@ fn read(repo: &Repo, path: &str, blob: ObjectId) -> Result<PageText> {
         title: title.replace(MARKERS, " "),
         body: visible.text.replace(MARKERS, " "),
         markdown,
+        questions: visible.questions,
     })
 }
 
@@ -128,8 +130,8 @@ impl Step<'_> {
         let text = read(self.repo, path, blob)?;
         let id = PageId::new(&self.commit.id, path);
         self.tx.execute(
-            "INSERT INTO pages (id, path, title, words, created, updated, versions, churn, blob) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 1, ?4, ?6)",
+            "INSERT INTO pages (id, path, title, words, created, updated, versions, churn, \
+             questions, blob) VALUES (?1, ?2, ?3, ?4, ?5, ?5, 1, ?4, 0, ?6)",
             params![
                 id.0,
                 path,
@@ -140,6 +142,7 @@ impl Step<'_> {
             ],
         )?;
         let rowid = self.tx.last_insert_rowid();
+        self.questions(rowid, &text.questions)?;
         self.tx.execute(
             "INSERT INTO versions (commit_seq, page, path, kind, version, words, added, removed, \
              blob) VALUES (?1, ?2, ?3, 'created', 1, ?4, ?4, 0, ?5)",
@@ -203,6 +206,23 @@ impl Step<'_> {
             "UPDATE search SET title = ?2, body = ?3 WHERE rowid = ?1",
             params![source.rowid, text.title, text.body],
         )?;
+        self.questions(source.rowid, &text.questions)
+    }
+
+    /// Replaces the page's open questions with `questions`, in page order.
+    fn questions(&self, rowid: i64, questions: &[String]) -> Result<()> {
+        self.tx
+            .execute("DELETE FROM questions WHERE page = ?1", [rowid])?;
+        let mut insert = self
+            .tx
+            .prepare_cached("INSERT INTO questions (page, position, text) VALUES (?1, ?2, ?3)")?;
+        for (position, question) in (0_i64..).zip(questions) {
+            insert.execute(params![rowid, position, question])?;
+        }
+        self.tx.execute(
+            "UPDATE pages SET questions = ?2 WHERE rowid = ?1",
+            params![rowid, i64::try_from(questions.len())?],
+        )?;
         Ok(())
     }
 
@@ -218,6 +238,6 @@ impl Step<'_> {
         )?;
         self.tx
             .execute("DELETE FROM search WHERE rowid = ?1", [source.rowid])?;
-        Ok(())
+        self.questions(source.rowid, &[])
     }
 }

@@ -17,7 +17,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::index::{
-    Filter, Hit, Listing, Missing, Order, Page, PageId, QueryError, Sort, Status, Version, Window,
+    Filter, Hit, Listing, Missing, Order, Page, PageId, QueryError, Question, Sort, Status,
+    Version, Window,
 };
 use crate::machines::Health;
 use crate::serve::Wiki;
@@ -37,6 +38,7 @@ pub fn router(wiki: Arc<Wiki>) -> Router {
         .route("/v1/pages/{id}/versions/{commit}", get(version))
         .route("/v1/pages/{id}/diff", get(diff))
         .route("/v1/changes", get(changes))
+        .route("/v1/questions", get(questions))
         .route("/v1/search", get(search))
         .route("/v1/machines", get(machines))
         .fallback(|| async { ApiError::NotFound("no such route".to_owned()) })
@@ -143,6 +145,12 @@ struct Paging {
 }
 
 #[derive(Deserialize)]
+struct Slice {
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
+#[derive(Deserialize)]
 struct SearchText {
     q: String,
 }
@@ -186,6 +194,12 @@ struct DiffBody {
     to: Option<String>,
     /// `None` when the texts are too long to compare line by line.
     lines: Option<Vec<DiffLine>>,
+}
+
+#[derive(Serialize)]
+struct QuestionsBody {
+    total: u32,
+    questions: Vec<Question>,
 }
 
 #[derive(Serialize)]
@@ -315,6 +329,16 @@ async fn changes(
         })
         .await?;
     Ok(Json(EventsBody { total, events }))
+}
+
+async fn questions(
+    State(wiki): State<Arc<Wiki>>,
+    Params(slice): Params<Slice>,
+) -> Result<Json<QuestionsBody>, ApiError> {
+    let (total, questions) = wiki
+        .read(move |_, index| index.questions(limit(slice.limit), slice.offset.unwrap_or(0)))
+        .await?;
+    Ok(Json(QuestionsBody { total, questions }))
 }
 
 async fn search(

@@ -24,6 +24,23 @@ pub enum Missing {
     Text,
 }
 
+/// Which page a question is on.
+#[derive(Clone, Debug, Serialize)]
+pub struct QuestionPage {
+    pub id: PageId,
+    pub path: String,
+    pub title: String,
+}
+
+/// A list item under an "Open questions" heading of a live page.
+#[derive(Clone, Debug, Serialize)]
+pub struct Question {
+    pub page: QuestionPage,
+    pub text: String,
+    /// When the page last changed.
+    pub updated: i64,
+}
+
 /// The order of a page listing.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -194,6 +211,40 @@ impl Index {
             .query_map(params_from_iter(&values), page_row)?
             .collect::<Result<_, _>>()?;
         Ok((total, pages))
+    }
+
+    /// Open questions of live pages, newest page first and then in page order, and how many
+    /// there are in all.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a database error.
+    pub fn questions(&self, limit: u32, offset: u32) -> Result<(u32, Vec<Question>)> {
+        let total = self.db.query_row(
+            "SELECT count(*) FROM questions q JOIN pages p ON p.rowid = q.page \
+             WHERE p.deleted IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut statement = self.db.prepare_cached(
+            "SELECT p.id, p.path, p.title, q.text, p.updated FROM questions q \
+             JOIN pages p ON p.rowid = q.page WHERE p.deleted IS NULL \
+             ORDER BY p.updated DESC, p.path, p.rowid, q.position LIMIT ?1 OFFSET ?2",
+        )?;
+        let questions = statement
+            .query_map(params![limit, offset], |row| {
+                Ok(Question {
+                    page: QuestionPage {
+                        id: PageId(row.get(0)?),
+                        path: row.get(1)?,
+                        title: row.get(2)?,
+                    },
+                    text: row.get(3)?,
+                    updated: row.get(4)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok((total, questions))
     }
 
     /// Events newest first, of one page or of all, at or after `since`, and how many there are

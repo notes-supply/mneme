@@ -193,16 +193,16 @@ impl Index {
         )?;
         values.extend(listing.page_values());
         let mut statement = self.db.prepare_cached(&format!(
-            "SELECT {PAGE_COLUMNS}, {SCORE}, snippet(search, -1, char(2), char(3), '…', 16) \
-             {from}{filter} ORDER BY {} LIMIT ? OFFSET ?",
+            "SELECT {PAGE_COLUMNS}, {SCORE} AS score, \
+             snippet(search, -1, char(2), char(3), '…', 16) AS snippet {from}{filter} ORDER BY {} LIMIT ? OFFSET ?",
             listing.order_by(Some(SCORE))
         ))?;
         let hits = statement
             .query_map(params_from_iter(&values), |row| {
                 Ok(Hit {
                     page: page_row(row)?,
-                    score: row.get(9)?,
-                    snippet: marks(&row.get::<_, String>(10)?),
+                    score: row.get("score")?,
+                    snippet: marks(&row.get::<_, String>("snippet")?),
                 })
             })?
             .collect::<Result<_, _>>()?;

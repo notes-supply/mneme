@@ -1,7 +1,7 @@
 //! What a reader sees on a page, from a comrak parse.
 
 use comrak::arena_tree::NodeEdge;
-use comrak::nodes::NodeValue;
+use comrak::nodes::{AstNode, NodeValue};
 use comrak::{Arena, Options};
 
 /// Markup characters, lines, entities and autolinks (counted twice). Dense emphasis costs
@@ -16,6 +16,8 @@ pub struct Visible {
     pub title: Option<String>,
     /// The text of each block on its own line, without the title heading.
     pub text: String,
+    /// Each top-level list item under a heading named "Open questions", on one line.
+    pub questions: Vec<String>,
 }
 
 fn options() -> Options<'static> {
@@ -39,14 +41,15 @@ fn formatted(markdown: &str) -> bool {
     markers + 2 * autolinks <= MARKUP_BUDGET
 }
 
-/// The title and the text that a reader sees on the page. A page over the markup budget has
-/// no title here, and its text is the raw Markdown.
+/// The title, the text and the open questions that a reader sees on the page. A page over the
+/// markup budget has no title or questions here, and its text is the raw Markdown.
 #[must_use]
 pub fn visible(markdown: &str) -> Visible {
     if !formatted(markdown) {
         return Visible {
             title: None,
             text: markdown.to_owned(),
+            questions: Vec::new(),
         };
     }
     let arena = Arena::new();
@@ -55,10 +58,20 @@ pub fn visible(markdown: &str) -> Visible {
         .descendants()
         .find(|node| matches!(node.data().value, NodeValue::Heading(ref h) if h.level == 1));
     let mut text = String::with_capacity(markdown.len());
-    let mut traverse = root.traverse();
+    push_text(root, title, &mut text);
+    Visible {
+        title: title.map(comrak::arena_tree::Node::collect_text),
+        text,
+        questions: questions(root),
+    }
+}
+
+/// Appends the visible text under `node`, each block on its own line, leaving out `skip`.
+fn push_text<'a>(node: &'a AstNode<'a>, skip: Option<&'a AstNode<'a>>, text: &mut String) {
+    let mut traverse = node.traverse();
     while let Some(edge) = traverse.next() {
         match edge {
-            NodeEdge::Start(node) if title.is_some_and(|title| std::ptr::eq(node, title)) => {
+            NodeEdge::Start(node) if skip.is_some_and(|skip| std::ptr::eq(node, skip)) => {
                 for edge in traverse.by_ref() {
                     if matches!(edge, NodeEdge::End(end) if std::ptr::eq(end, node)) {
                         break;
@@ -80,10 +93,38 @@ pub fn visible(markdown: &str) -> Visible {
             NodeEdge::End(_) => {}
         }
     }
-    Visible {
-        title: title.map(comrak::arena_tree::Node::collect_text),
-        text,
+}
+
+/// The items of the lists between each "Open questions" heading and the next heading of the
+/// same or a higher level. A nested list is part of its item's text.
+fn questions<'a>(root: &'a AstNode<'a>) -> Vec<String> {
+    let mut questions = Vec::new();
+    for heading in root.descendants() {
+        let level = match heading.data().value {
+            NodeValue::Heading(ref h) => h.level,
+            _ => continue,
+        };
+        if heading.collect_text().trim().to_lowercase() != "open questions" {
+            continue;
+        }
+        for block in heading.following_siblings().skip(1) {
+            match block.data().value {
+                NodeValue::Heading(ref next) if next.level <= level => break,
+                NodeValue::List(_) => {
+                    for item in block.children() {
+                        let mut text = String::new();
+                        push_text(item, None, &mut text);
+                        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                        if !line.is_empty() {
+                            questions.push(line);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
+    questions
 }
 
 #[cfg(test)]
@@ -120,5 +161,30 @@ mod tests {
         let page = visible(&markdown);
         assert_eq!(page.title, None);
         assert_eq!(page.text, markdown);
+        let questions = format!(
+            "## Open questions\n\n- Why?\n\n{}",
+            "*a* ".repeat(MARKUP_BUDGET)
+        );
+        assert_eq!(visible(&questions).questions, Vec::<String>::new());
+    }
+
+    #[test]
+    fn open_questions_are_the_top_level_items_under_their_heading() {
+        let page = visible(
+            "# Plan\n\n- not a question\n\n##   Open Questions   \n\nIntro.\n\n\
+             - Should we *move* the [harbour](h.md)?\n  It is\n  old.\n  - a detail\n\
+             - [ ] Who pays?\n-\n\n### Smaller\n\n1. Still under the heading?\n\n\
+             ## Next\n\n- not a question either\n\n### open questions\n\n- `code` too\n\n\
+             # Top\n\n- outside\n",
+        );
+        assert_eq!(
+            page.questions,
+            [
+                "Should we move the harbour? It is old. a detail",
+                "Who pays?",
+                "Still under the heading?",
+                "code too",
+            ]
+        );
     }
 }

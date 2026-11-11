@@ -1,15 +1,16 @@
 {
   "pages": [
     {
-      "churn": 12,
+      "churn": 28,
       "created": 1788221400,
       "deleted": null,
       "id": "9441e2ad011c494e",
       "path": "AGENTS.md",
+      "questions": 2,
       "title": "Agents",
       "updated": 1788225600,
       "versions": 2,
-      "words": 10
+      "words": 26
     },
     {
       "churn": 18,
@@ -17,6 +18,7 @@
       "deleted": null,
       "id": "4226c96dd1386f3a",
       "path": "greek/alpha.md",
+      "questions": 0,
       "title": "Alpha",
       "updated": 1788226800,
       "versions": 3,
@@ -28,6 +30,7 @@
       "deleted": 1788223800,
       "id": "585a7e42996476f8",
       "path": "notes/deep.md",
+      "questions": 0,
       "title": "deep",
       "updated": 1788221400,
       "versions": 1,
@@ -39,6 +42,7 @@
       "deleted": null,
       "id": "eaff4eab5f29fcc2",
       "path": "notes/deep.md",
+      "questions": 0,
       "title": "Deep again",
       "updated": 1788224400,
       "versions": 1,
@@ -50,6 +54,7 @@
       "deleted": null,
       "id": "27d4c6d2c38ddd0a",
       "path": "minnen från gotland.md",
+      "questions": 0,
       "title": "Gotländska minnen",
       "updated": 1788223200,
       "versions": 2,
@@ -61,6 +66,7 @@
       "deleted": null,
       "id": "dd4e4e0ff93dcba6",
       "path": "index.md",
+      "questions": 0,
       "title": "Home",
       "updated": 1788225000,
       "versions": 2,

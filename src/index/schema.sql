@@ -16,6 +16,7 @@ CREATE TABLE pages (
     updated INTEGER NOT NULL,
     versions INTEGER NOT NULL,
     churn INTEGER NOT NULL,
+    questions INTEGER NOT NULL,
     deleted INTEGER,
     blob TEXT
 );
@@ -37,6 +38,13 @@ CREATE TABLE versions (
 );
 
 CREATE INDEX versions_page ON versions (page, seq);
+
+CREATE TABLE questions (
+    page INTEGER NOT NULL REFERENCES pages (rowid),
+    position INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (page, position)
+);
 
 CREATE VIRTUAL TABLE search USING fts5 (
     title,

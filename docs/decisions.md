@@ -23,6 +23,8 @@ Choices made while building Mneme that the design brief left open or that differ
 - **Every listing has a `total`.** The page filters of search also work on `/v1/pages`.
 - **Search scores are `-bm25`,** so higher is better and `desc` is the default order like every other numeric sort.
 - **Snippets are lists of runs** `{ text, hit }` rather than marked-up strings, so the frontend never parses HTML out of page text.
+- **Open questions are found when a version is indexed,** from the comrak parse that already gives the title and the search text, and stored in a table of their own. A question's `updated` is its page's `updated`, the last version, so a rename alone does not move it.
+- **Each page carries its number of open questions.** It is a column the index writes with the questions, so `/v1/pages` and `/v1/pages/{id}` read it with no extra query.
 - **docs/api.md links its examples** in `tests/fixtures/api/` instead of copying them, so the documented responses are the tested ones.
 
 ## Git over HTTPS

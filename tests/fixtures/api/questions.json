@@ -1,0 +1,23 @@
+{
+  "questions": [
+    {
+      "page": {
+        "id": "9441e2ad011c494e",
+        "path": "AGENTS.md",
+        "title": "Agents"
+      },
+      "text": "Should agents sign their pages?",
+      "updated": 1788225600
+    },
+    {
+      "page": {
+        "id": "9441e2ad011c494e",
+        "path": "AGENTS.md",
+        "title": "Agents"
+      },
+      "text": "Who reads what an agent wrote?",
+      "updated": 1788225600
+    }
+  ],
+  "total": 2
+}

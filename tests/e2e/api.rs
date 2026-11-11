@@ -228,6 +228,74 @@ fn pages_sort_order_filter_and_page() {
     );
 }
 
+fn questions(server: &Server, query: &str) -> Vec<(String, String)> {
+    server.json(&format!("/v1/questions{query}"))["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|question| {
+            let path = question["page"]["path"].as_str().unwrap().to_owned();
+            (path, question["text"].as_str().unwrap().to_owned())
+        })
+        .collect()
+}
+
+fn pair(path: &str, text: &str) -> (String, String) {
+    (path.to_owned(), text.to_owned())
+}
+
+#[test]
+fn open_questions_are_listed_newest_page_first_and_then_in_page_order() {
+    let work = Work::new();
+    let asked = "## Open questions\n\n- Is it far?\n";
+    work.write(
+        "trip.md",
+        "# Trip\n\n## Open questions\n\n- Where do we *sleep*?\n- Who drives?\n",
+    );
+    work.write("gone.md", &format!("# Gone\n\n{asked}"));
+    work.write("answered.md", &format!("# Answered\n\n{asked}"));
+    let dense = "*a* ".repeat(20_000);
+    work.write("dense.md", &format!("# Dense\n\n{asked}\n{dense}\n"));
+    work.commit("Plan the trip");
+    work.write(
+        "boat.md",
+        "# Boat\n\n### OPEN QUESTIONS\n\n- Which harbour?\n",
+    );
+    work.remove("gone.md");
+    work.write("answered.md", "# Answered\n\nIt is near.\n");
+    let second = work.commit("Plan the boat");
+    let server = Server::of(&work);
+    let listing = server.json("/v1/questions");
+    assert_eq!(listing["total"], 3);
+    assert_eq!(
+        questions(&server, ""),
+        [
+            pair("boat.md", "Which harbour?"),
+            pair("trip.md", "Where do we sleep?"),
+            pair("trip.md", "Who drives?"),
+        ],
+        "a deleted page, an answered page and a page over the markup budget have none"
+    );
+    let boat = live_page(&server, "boat.md");
+    let first = &listing["questions"][0];
+    assert_eq!(first["page"]["id"], boat["id"]);
+    assert_eq!(first["page"]["title"], "Boat");
+    assert_eq!(first["updated"], boat["updated"]);
+    assert_eq!(
+        work.ok(&["log", "-1", "--format=%at", &second]).trim(),
+        first["updated"].to_string()
+    );
+    assert_eq!(
+        questions(&server, "?limit=1&offset=1"),
+        [pair("trip.md", "Where do we sleep?")]
+    );
+    assert_eq!(boat["questions"], 1);
+    assert_eq!(live_page(&server, "trip.md")["questions"], 2);
+    assert_eq!(live_page(&server, "answered.md")["questions"], 0);
+    let trip = server.json(&format!("/v1/pages/{}", id(&live_page(&server, "trip.md"))));
+    assert_eq!(trip["page"]["questions"], 2);
+}
+
 fn search_wiki() -> Work {
     let work = Work::new();
     work.write(
@@ -430,6 +498,7 @@ fn every_route_answers_in_the_shape_of_its_example_file() {
         ("diff", format!("/v1/pages/{alpha}/diff")),
         ("changes", "/v1/changes".to_owned()),
         ("search", "/v1/search?q=harbours".to_owned()),
+        ("questions", "/v1/questions".to_owned()),
         ("machines", "/v1/machines".to_owned()),
     ];
     for (name, path) in routes {

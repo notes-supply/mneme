@@ -282,7 +282,8 @@ pub fn standard() -> Work {
 
     work.write(
         "AGENTS.md",
-        "# Agents\n\nHow agents work in this wiki, with care.\n",
+        "# Agents\n\nHow agents work in this wiki, with care.\n\n## Open questions\n\n\
+         - Should agents sign their pages?\n- Who reads what an agent *wrote*?\n",
     );
     work.commit("Save AGENTS.md\n\nOverlap: aeolus");
 

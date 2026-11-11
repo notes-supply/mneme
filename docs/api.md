@@ -33,7 +33,7 @@ Live pages, as `{ "total", "pages": [Page] }`.
 | `changed_within_days`, `created_within_days` | a version, or the creation, in the last so many days |
 | `min_versions`, `max_versions`, `min_words`, `max_words` | bounds, inclusive |
 
-A `Page` has `id`, `path`, `title`, `words`, `created`, `updated` (the last version), `versions`, `churn` and `deleted` (the time of the deletion, or `null`). The title is the first level-1 heading, or the file name without `.md`. Words are runs of non-whitespace in the Markdown.
+A `Page` has `id`, `path`, `title`, `words`, `created`, `updated` (the last version), `versions`, `churn`, `questions` (how many [open questions](#get-v1questions) it has now) and `deleted` (the time of the deletion, or `null`). The title is the first level-1 heading, or the file name without `.md`. Words are runs of non-whitespace in the Markdown.
 
 Example: [`pages.json`](../tests/fixtures/api/pages.json).
 
@@ -77,6 +77,16 @@ Example: [`diff.json`](../tests/fixtures/api/diff.json).
 Events across all pages, newest first, as `{ "total", "events": [Event] }`. Parameters are `limit`, `offset` and `since`.
 
 Example: [`changes.json`](../tests/fixtures/api/changes.json).
+
+## `GET /v1/questions`
+
+The open questions of live pages, as `{ "total", "questions": [Question] }`: the most recently updated page first, and each page's questions in the order they appear on it. Parameters are `limit` and `offset`.
+
+A writer leaves a question as a list item under a heading named "Open questions", at any level, compared without case or surrounding space. Each top-level item between that heading and the next heading of the same or a higher level is one question. A nested list is part of its item's text, and an item with no text is left out.
+
+A `Question` has `page`, which is `{ "id", "path", "title" }`, `text`, the item's visible text on one line, and `updated`, the page's `updated`. A page with very much markup, which search reads as raw Markdown, has no questions.
+
+Example: [`questions.json`](../tests/fixtures/api/questions.json).
 
 ## `GET /v1/search?q=`
 

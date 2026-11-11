@@ -14,7 +14,7 @@ mod apply;
 mod read;
 mod search;
 
-pub use read::{Diff, End, Filter, Listing, Missing, Order, Sort, Window};
+pub use read::{Diff, End, Filter, Listing, Missing, Order, Question, Sort, Window};
 pub use search::{Hit, Mark, Query, QueryError};
 
 /// Stable id of a page across renames: a hash of the path it was created at and the commit
@@ -61,6 +61,8 @@ pub struct Page {
     pub versions: u32,
     /// Words added plus words removed over all versions.
     pub churn: i64,
+    /// Open questions on the page now.
+    pub questions: u32,
     /// Author time of the commit that deleted the page.
     pub deleted: Option<i64>,
 }
@@ -113,8 +115,8 @@ pub struct Index {
     build: Duration,
 }
 
-pub(super) const PAGE_COLUMNS: &str =
-    "p.id, p.path, p.title, p.words, p.created, p.updated, p.versions, p.churn, p.deleted";
+pub(super) const PAGE_COLUMNS: &str = "p.id, p.path, p.title, p.words, p.created, p.updated, p.versions, p.churn, p.questions, \
+     p.deleted";
 
 pub(super) const VERSION_SELECT: &str = "SELECT c.id, p.id, v.path, c.time, c.author, v.kind, v.from_path, \
      v.version, v.words, v.added, v.removed, c.overlap \
@@ -197,7 +199,8 @@ pub(super) fn page_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
         updated: row.get(5)?,
         versions: row.get(6)?,
         churn: row.get(7)?,
-        deleted: row.get(8)?,
+        questions: row.get(8)?,
+        deleted: row.get(9)?,
     })
 }
 
