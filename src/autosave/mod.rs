@@ -300,8 +300,17 @@ impl Autosave {
         if !run.success {
             return Ok(Some(run.error()));
         }
+        self.refresh_index()?;
         log::emit("index rebuilt", json!({ "from": "HEAD" }));
         Ok(None)
+    }
+
+    /// Stores what the files look like in the index. The service's own `git status` does not,
+    /// so that it never takes the index's lock from under a writer, and a checkout refuses to
+    /// move a file whose entry is out of date even when its text is unchanged.
+    fn refresh_index(&self) -> Result<()> {
+        self.git.ok(&["update-index", "-q", "--refresh"])?;
+        Ok(())
     }
 
     /// Commits everything, unless that would delete more than half of the pages and more
@@ -496,6 +505,7 @@ impl Autosave {
     /// Takes the server's commits. Git refuses when that would overwrite a file with unsaved
     /// edits, which is right: they are saved first, and the next tick replays them.
     fn fast_forward(&self, origin: &str) -> Result<bool> {
+        self.refresh_index()?;
         let run = self.git.run(&["merge", "--quiet", "--ff-only", origin])?;
         self.moved_or_waiting(&run, "merge --ff-only")
     }
@@ -516,6 +526,7 @@ impl Autosave {
         if self.head()?.as_deref() != Some(head) {
             return Ok(false);
         }
+        self.refresh_index()?;
         let run = self.git.run(&["reset", "--quiet", "--keep", &tip])?;
         self.moved_or_waiting(&run, "reset --keep")
     }

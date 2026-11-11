@@ -93,6 +93,7 @@ struct Tally {
     overlaps_on_purpose: [usize; 5],
     hand_commits: usize,
     hand_merges: usize,
+    dead_locks: usize,
     commits_made: usize,
     replays_that_overlapped: usize,
     replays_that_merged: usize,
@@ -115,6 +116,7 @@ impl Tally {
         }
         self.hand_commits += other.hand_commits;
         self.hand_merges += other.hand_merges;
+        self.dead_locks += other.dead_locks;
         self.commits_made += other.commits_made;
         self.replays_that_overlapped += other.replays_that_overlapped;
         self.replays_that_merged += other.replays_that_merged;
@@ -406,6 +408,7 @@ impl Sim {
             84..86 => self.delete_on_two(clone),
             86..90 => self.hand_commit(clone),
             90..94 => self.hand_pull(clone),
+            94..96 => self.dead_lock(clone),
             _ => self.toggle_network(clone),
         }
     }
@@ -763,6 +766,32 @@ impl Sim {
         self.note(clone, &what);
         self.tally.hand_merges += usize::from(merged && !merging);
         self.read_reflog(clone);
+    }
+
+    /// A Git command that died a while ago left its `index.lock`, and half the time half an
+    /// index. The clone's next tick must clear both and carry on.
+    fn dead_lock(&mut self, clone: usize) {
+        let git_dir = self.clones[clone].path().join(".git");
+        let lock = git_dir.join("index.lock");
+        fs::write(&lock, "").unwrap();
+        let age = STALE_LOCK + Duration::from_secs(self.rng.u64(1..600));
+        File::options()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_modified(self.now - age)
+            .unwrap();
+        let broken = self.rng.bool();
+        if broken {
+            fs::write(git_dir.join("index"), "half an index").unwrap();
+        }
+        self.note(
+            clone,
+            &format!("a dead command's lock, broken index {broken}"),
+        );
+        self.tally.dead_locks += 1;
+        self.tick(clone);
+        assert!(!lock.exists(), "seed {}: the dead lock is gone", self.seed);
     }
 
     fn toggle_network(&mut self, clone: usize) {

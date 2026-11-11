@@ -570,3 +570,41 @@ fn an_index_a_dead_command_left_unreadable_is_read_again_from_head() {
     );
     assert_eq!(wiki.ok(&["status", "--porcelain"]), "");
 }
+
+/// Seed 24 of the simulation. A hand commit leaves nothing to save, the server has moved, and a
+/// dead command left a lock and half an index. The rebuilt index holds no file stats, and
+/// `git reset --keep` refuses to move a file whose entry is out of date, so the service must
+/// store them first.
+#[test]
+fn a_replay_right_after_the_index_is_rebuilt_moves_the_folder() {
+    let mut wiki = Wiki::new();
+    let other = TempDir::new().unwrap();
+    let header = format!("http.extraHeader=Authorization: Bearer {}", MACHINES[0].1);
+    let url = wiki.server.git_url();
+    wiki.git
+        .ok(other.path(), &["-c", &header, "clone", "-q", &url, "."]);
+    fs::write(
+        other.path().join("page-5.md"),
+        "# Page 5\n\nfrom elsewhere\n",
+    )
+    .unwrap();
+    wiki.git
+        .ok(other.path(), &["commit", "-q", "-am", "Edit elsewhere"]);
+    wiki.git.ok(
+        other.path(),
+        &["-c", &header, "push", "-q", "origin", "main"],
+    );
+    wiki.write("page-1.md", "# Page 1\n\nby hand\n");
+    wiki.ok(&["commit", "-q", "-am", "Edit by hand"]);
+    leave_a_lock_by_killing_git(&wiki);
+    fs::write(wiki.path().join(".git/index"), "half an index").unwrap();
+
+    wiki.now += Duration::from_secs(300);
+    assert_eq!(wiki.tick(), Outcome::Pushed);
+    assert_eq!(wiki.server_head(), wiki.head());
+    assert_eq!(
+        fs::read_to_string(wiki.path().join("page-5.md")).unwrap(),
+        "# Page 5\n\nfrom elsewhere\n"
+    );
+    assert_eq!(wiki.ok(&["status", "--porcelain"]), "");
+}
