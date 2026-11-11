@@ -26,7 +26,7 @@ mneme autosave init --folder ~/wiki --server https://host --token-file ~/.config
 mneme autosave run  --folder ~/wiki --server https://host --token-file ~/.config/mneme/token --name blackbox
 ```
 
-`init` clones into a missing or empty folder, or checks an existing clone. A folder takes one service: a second `run` on it exits. [deploy/mneme-autosave.service](deploy/mneme-autosave.service) runs the service as a systemd user unit. It reports its state to the server, which lists every machine on `/v1/machines`.
+`init` clones into a missing or empty folder, or checks an existing clone. Both need Git 2.45 or newer. A folder takes one service: a second `run` on it exits. [deploy/mneme-autosave.service](deploy/mneme-autosave.service) runs the service as a systemd user unit. It reports its state to the server, which lists every machine on `/v1/machines`.
 
 ## Check it
 
