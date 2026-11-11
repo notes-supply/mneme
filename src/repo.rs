@@ -49,9 +49,9 @@ pub enum Change {
     },
 }
 
-/// The wiki's repository.
+/// The wiki's repository, opened on one thread.
 pub struct Repo {
-    repo: gix::ThreadSafeRepository,
+    repo: gix::Repository,
 }
 
 impl Repo {
@@ -61,11 +61,10 @@ impl Repo {
     ///
     /// Fails when `path` is not a Git repository.
     pub fn open(path: &Path) -> Result<Self> {
-        let repo = gix::open(path)
+        let mut repo = gix::open(path)
             .with_context(|| format!("opening the repository at {}", path.display()))?;
-        Ok(Self {
-            repo: repo.into_sync(),
-        })
+        repo.object_cache_size_if_unset(4 << 20);
+        Ok(Self { repo })
     }
 
     /// The commit at the tip of `main`, or `None` while the repository is empty.
@@ -74,8 +73,7 @@ impl Repo {
     ///
     /// Fails when the ref cannot be read.
     pub fn head(&self) -> Result<Option<ObjectId>> {
-        let repo = self.repo.to_thread_local();
-        let reference = repo.try_find_reference(MAIN)?;
+        let reference = self.repo.try_find_reference(MAIN)?;
         Ok(reference
             .map(|mut reference| reference.peel_to_id())
             .transpose()?
@@ -88,8 +86,7 @@ impl Repo {
     ///
     /// Fails when an object cannot be read, or when `after` is not on `main`.
     pub fn commits_after(&self, after: Option<ObjectId>) -> Result<Vec<Commit>> {
-        let mut repo = self.repo.to_thread_local();
-        repo.object_cache_size_if_unset(4 << 20);
+        let repo = &self.repo;
         let mut ids = Vec::new();
         let mut next = self.head()?;
         while let Some(id) = next {
@@ -109,7 +106,7 @@ impl Repo {
                 after.unwrap_or(ObjectId::null(repo.object_hash()))
             );
         }
-        ids.iter().rev().map(|&id| commit(&repo, id)).collect()
+        ids.iter().rev().map(|&id| commit(repo, id)).collect()
     }
 
     /// The text of a blob. Bytes that are not UTF-8 are replaced.
@@ -118,8 +115,7 @@ impl Repo {
     ///
     /// Fails when the blob cannot be read.
     pub fn text(&self, blob: ObjectId) -> Result<String> {
-        let repo = self.repo.to_thread_local();
-        let blob = repo.find_blob(blob)?;
+        let blob = self.repo.find_blob(blob)?;
         Ok(String::from_utf8_lossy(&blob.data).into_owned())
     }
 }

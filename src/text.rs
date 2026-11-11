@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use serde::Serialize;
 use similar::{Algorithm, ChangeTag, DiffTag, TextDiff};
 
 const CONTEXT_LINES: usize = 2;
@@ -102,13 +103,14 @@ fn line_breaks(text: &str) -> usize {
         .count()
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Span {
     pub text: String,
     pub changed: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum DiffLine {
     Same(String),
     Removed(Vec<Span>),

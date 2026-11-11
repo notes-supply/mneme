@@ -1,167 +1,189 @@
-use mneme::index::{Index, Kind, Page};
-use mneme::repo::Repo;
+use serde_json::Value;
 
 use crate::git::{self, Work};
+use crate::server::Server;
 
-fn index(work: &Work) -> Index {
-    Index::build(&Repo::open(work.path()).unwrap()).unwrap()
+pub fn all_pages(server: &Server) -> Vec<Value> {
+    server.json("/v1/pages?deleted=true&limit=500")["pages"]
+        .as_array()
+        .unwrap()
+        .clone()
 }
 
-fn page<'a>(pages: &'a [Page], path: &str) -> &'a Page {
-    pages
+pub fn live_page(server: &Server, path: &str) -> Value {
+    server.json("/v1/pages?limit=500")["pages"]
+        .as_array()
+        .unwrap()
         .iter()
-        .find(|page| page.path == path)
+        .find(|page| page["path"] == path)
         .unwrap_or_else(|| panic!("no page at {path}"))
+        .clone()
+}
+
+pub fn events(server: &Server, page: &Value) -> Vec<Value> {
+    let id = page["id"].as_str().unwrap();
+    server.json(&format!("/v1/pages/{id}/versions?limit=500"))["events"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// For every page, the versions the API counts are the commits in which `git log --follow`
+/// sees its blob change.
+pub fn assert_versions_match_git(server: &Server, work: &Work) {
+    let pages = all_pages(server);
+    assert_ne!(pages.len(), 0);
+    for page in &pages {
+        let events = events(server, page);
+        let (last, created) = (events.first().unwrap(), events.last().unwrap());
+        let path = page["path"].as_str().unwrap();
+        let expected = work.text_changes(
+            path,
+            created["commit"].as_str().unwrap(),
+            last["commit"].as_str().unwrap(),
+        );
+        assert_eq!(page["versions"], expected, "{path}");
+        let versions = events
+            .iter()
+            .filter(|event| event["version"] == true)
+            .count();
+        assert_eq!(versions, expected, "{path}");
+    }
+}
+
+fn kinds(events: &[Value]) -> Vec<(String, bool)> {
+    events
+        .iter()
+        .map(|event| {
+            let kind = event["kind"].as_str().unwrap();
+            let kind = match event["from"].as_str() {
+                Some(from) => format!("{kind} from {from}"),
+                None => kind.to_owned(),
+            };
+            (kind, event["version"] == true)
+        })
+        .collect()
 }
 
 #[test]
 fn every_page_has_as_many_versions_as_git_log_follow_finds() {
     let work = git::standard();
-    let index = index(&work);
-    let pages = index.pages(true).unwrap();
-    assert_eq!(pages.len(), 6, "{pages:#?}");
-    for page in &pages {
-        let events = index.versions(&page.id).unwrap();
-        let (last, created) = (events.first().unwrap(), events.last().unwrap());
-        let expected = work.text_changes(&page.path, &created.commit, &last.commit);
-        assert_eq!(page.versions as usize, expected, "{}", page.path);
-        let versions = events.iter().filter(|event| event.version).count();
-        assert_eq!(versions, expected, "{}", page.path);
-    }
+    let server = Server::of(&work);
+    assert_eq!(all_pages(&server).len(), 6);
+    assert_versions_match_git(&server, &work);
 }
 
 #[test]
 fn a_rename_keeps_the_page_and_is_not_a_version() {
     let work = git::standard();
-    let index = index(&work);
-    let pages = index.pages(false).unwrap();
-    let alpha = page(&pages, "greek/alpha.md");
-    let events = index.versions(&alpha.id).unwrap();
-    let kinds: Vec<_> = events.iter().map(|e| (&e.kind, e.version)).collect();
+    let server = Server::of(&work);
+    let alpha = live_page(&server, "greek/alpha.md");
     assert_eq!(
-        kinds,
+        kinds(&events(&server, &alpha)),
         [
-            (&Kind::Edited, true),
-            (
-                &Kind::Renamed {
-                    from: "alpha.md".to_owned()
-                },
-                false
-            ),
-            (&Kind::Edited, true),
-            (&Kind::Created, true),
+            ("edited".to_owned(), true),
+            ("renamed from alpha.md".to_owned(), false),
+            ("edited".to_owned(), true),
+            ("created".to_owned(), true),
         ]
     );
-    assert_eq!(alpha.versions, 3);
+    assert_eq!(alpha["versions"], 3);
 }
 
 #[test]
 fn a_rename_with_an_edit_is_a_version() {
     let work = git::standard();
-    let index = index(&work);
-    let pages = index.pages(false).unwrap();
-    let memories = page(&pages, "minnen från gotland.md");
-    let events = index.versions(&memories.id).unwrap();
-    let renamed = &events[0];
+    let server = Server::of(&work);
+    let memories = live_page(&server, "minnen från gotland.md");
+    let renamed = &events(&server, &memories)[0];
+    assert_eq!(renamed["kind"], "renamed");
+    assert_eq!(renamed["from"], "gotländska minnen.md");
+    assert_eq!(renamed["version"], true);
     assert_eq!(
-        renamed.kind,
-        Kind::Renamed {
-            from: "gotländska minnen.md".to_owned()
-        }
+        (&renamed["added"], &renamed["removed"]),
+        (&1.into(), &1.into())
     );
-    assert!(renamed.version);
-    assert_eq!((renamed.added, renamed.removed), (1, 1));
-    assert_eq!(memories.title, "Gotländska minnen");
+    assert_eq!(memories["title"], "Gotländska minnen");
 }
 
 #[test]
 fn a_page_recreated_at_the_same_path_is_a_new_page() {
     let work = git::standard();
-    let index = index(&work);
-    let pages = index.pages(true).unwrap();
-    let deep: Vec<_> = pages.iter().filter(|p| p.path == "notes/deep.md").collect();
+    let server = Server::of(&work);
+    let deep: Vec<_> = all_pages(&server)
+        .into_iter()
+        .filter(|page| page["path"] == "notes/deep.md")
+        .collect();
     assert_eq!(deep.len(), 2);
-    assert_ne!(deep[0].id, deep[1].id);
-    let (old, new) = if deep[0].deleted.is_some() {
-        (deep[0], deep[1])
+    assert_ne!(deep[0]["id"], deep[1]["id"]);
+    let (old, new) = if deep[0]["deleted"].is_null() {
+        (&deep[1], &deep[0])
     } else {
-        (deep[1], deep[0])
+        (&deep[0], &deep[1])
     };
     assert_eq!(
-        old.title, "deep",
-        "a page without a heading is titled by its file name"
+        old["title"], "deep",
+        "a page without a heading has its file name as title"
     );
-    assert_eq!(new.title, "Deep again");
-    assert_eq!(new.deleted, None);
-    let deletion = &index.versions(&old.id).unwrap()[0];
-    assert_eq!(deletion.kind, Kind::Deleted);
-    assert!(!deletion.version);
-    assert_eq!(deletion.removed, 5);
+    assert_eq!(new["title"], "Deep again");
+    let deletion = &events(&server, old)[0];
+    assert_eq!(deletion["kind"], "deleted");
+    assert_eq!(deletion["version"], false);
+    assert_eq!(deletion["removed"], 5);
+    let deleted = server.json(&format!("/v1/pages/{}", old["id"].as_str().unwrap()));
+    assert_eq!(deleted["markdown"], Value::Null);
 }
 
 #[test]
-fn files_that_are_not_pages_are_ignored_and_dotted_names_are_kept() {
+fn files_that_are_not_pages_are_ignored() {
     let work = git::standard();
-    let index = index(&work);
-    let paths: Vec<_> = index
-        .pages(false)
+    let server = Server::of(&work);
+    let listing = server.json("/v1/pages?sort=title");
+    let paths: Vec<_> = listing["pages"]
+        .as_array()
         .unwrap()
-        .into_iter()
-        .map(|page| page.path)
+        .iter()
+        .map(|page| page["path"].as_str().unwrap())
         .collect();
     assert_eq!(
         paths,
         [
             "AGENTS.md",
             "greek/alpha.md",
-            "index.md",
+            "notes/deep.md",
             "minnen från gotland.md",
-            "notes/deep.md"
+            "index.md"
         ]
     );
+    assert_eq!(listing["total"], 5);
 }
 
 #[test]
 fn the_overlap_trailer_and_the_author_are_recorded() {
     let work = git::standard();
-    let index = index(&work);
-    let pages = index.pages(false).unwrap();
-    let agents = index.versions(&page(&pages, "AGENTS.md").id).unwrap();
-    assert_eq!(agents[0].overlap.as_deref(), Some("aeolus"));
-    assert_eq!(agents[1].overlap, None);
-    assert_eq!(agents[0].author, "Writer");
+    let server = Server::of(&work);
+    let agents = events(&server, &live_page(&server, "AGENTS.md"));
+    assert_eq!(agents[0]["overlap"], "aeolus");
+    assert_eq!(agents[1]["overlap"], Value::Null);
+    assert_eq!(agents[0]["author"], "Writer");
     assert_eq!(
-        agents[0].time,
+        agents[0]["time"],
         git::START + 8 * 600,
         "author time of the eighth commit"
     );
 }
 
 #[test]
-fn an_update_with_new_commits_matches_a_fresh_build() {
+fn changes_list_every_event_newest_first() {
     let work = git::standard();
-    let repo = Repo::open(work.path()).unwrap();
-    let mut index = Index::build(&repo).unwrap();
-    work.rename("index.md", "home.md");
-    work.write(
-        "notes/deep.md",
-        "# Deep again\n\nA new page at the old path, edited.\n",
-    );
-    work.commit("Rename home and edit the deep note");
-    assert_eq!(index.update(&repo).unwrap(), 1);
-    assert_eq!(index.update(&repo).unwrap(), 0);
-    let fresh = Index::build(&repo).unwrap();
-    let facts = |index: &Index| {
-        index
-            .pages(true)
-            .unwrap()
-            .into_iter()
-            .map(|page| {
-                let events = index.versions(&page.id).unwrap();
-                format!("{page:?} {events:?}")
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(facts(&index), facts(&fresh));
-    assert_eq!(index.status().unwrap().commits, 11);
+    let server = Server::of(&work);
+    let changes = server.json("/v1/changes?limit=3");
+    assert_eq!(changes["total"], 13);
+    let events = changes["events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["path"], "greek/alpha.md");
+    assert_eq!(events[1]["path"], "AGENTS.md");
+    let since = git::START + 6 * 600;
+    let recent = server.json(&format!("/v1/changes?since={since}"));
+    assert_eq!(recent["total"], 4);
 }

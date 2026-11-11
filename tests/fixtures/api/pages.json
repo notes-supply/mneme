@@ -1,0 +1,71 @@
+{
+  "pages": [
+    {
+      "churn": 12,
+      "created": 1788221400,
+      "deleted": null,
+      "id": "9441e2ad011c494e",
+      "path": "AGENTS.md",
+      "title": "Agents",
+      "updated": 1788225600,
+      "versions": 2,
+      "words": 10
+    },
+    {
+      "churn": 18,
+      "created": 1788221400,
+      "deleted": null,
+      "id": "4226c96dd1386f3a",
+      "path": "greek/alpha.md",
+      "title": "Alpha",
+      "updated": 1788226800,
+      "versions": 3,
+      "words": 18
+    },
+    {
+      "churn": 5,
+      "created": 1788221400,
+      "deleted": 1788223800,
+      "id": "585a7e42996476f8",
+      "path": "notes/deep.md",
+      "title": "deep",
+      "updated": 1788221400,
+      "versions": 1,
+      "words": 5
+    },
+    {
+      "churn": 10,
+      "created": 1788224400,
+      "deleted": null,
+      "id": "eaff4eab5f29fcc2",
+      "path": "notes/deep.md",
+      "title": "Deep again",
+      "updated": 1788224400,
+      "versions": 1,
+      "words": 10
+    },
+    {
+      "churn": 17,
+      "created": 1788221400,
+      "deleted": null,
+      "id": "27d4c6d2c38ddd0a",
+      "path": "minnen från gotland.md",
+      "title": "Gotländska minnen",
+      "updated": 1788223200,
+      "versions": 2,
+      "words": 15
+    },
+    {
+      "churn": 9,
+      "created": 1788221400,
+      "deleted": null,
+      "id": "dd4e4e0ff93dcba6",
+      "path": "index.md",
+      "title": "Home",
+      "updated": 1788225000,
+      "versions": 2,
+      "words": 9
+    }
+  ],
+  "total": 6
+}

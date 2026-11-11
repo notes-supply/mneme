@@ -1,0 +1,31 @@
+{
+  "from": "0bcf4c26fca591ce5d85e5588732e00489eaf954",
+  "lines": [
+    {
+      "kind": "skipped",
+      "value": 3
+    },
+    {
+      "kind": "same",
+      "value": ""
+    },
+    {
+      "kind": "same",
+      "value": "Now with a second line."
+    },
+    {
+      "kind": "added",
+      "value": []
+    },
+    {
+      "kind": "added",
+      "value": [
+        {
+          "changed": false,
+          "text": "And a third."
+        }
+      ]
+    }
+  ],
+  "to": "faf510a1fb457f1af5496ca64dea77ed68ddb2f8"
+}

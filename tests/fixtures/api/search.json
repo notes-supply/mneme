@@ -1,0 +1,33 @@
+{
+  "hits": [
+    {
+      "page": {
+        "churn": 18,
+        "created": 1788221400,
+        "deleted": null,
+        "id": "4226c96dd1386f3a",
+        "path": "greek/alpha.md",
+        "title": "Alpha",
+        "updated": 1788226800,
+        "versions": 3,
+        "words": 18
+      },
+      "score": 0.914780750325239,
+      "snippet": [
+        {
+          "hit": false,
+          "text": "The first page talks about boats and "
+        },
+        {
+          "hit": true,
+          "text": "harbours"
+        },
+        {
+          "hit": false,
+          "text": ".\nNow with a second line.\nAnd a third.\n"
+        }
+      ]
+    }
+  ],
+  "total": 1
+}
