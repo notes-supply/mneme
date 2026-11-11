@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # Builds the server's image and checks it as it will run: non-root, read-only, the repository on
-# a volume, the tokens mounted read-only, a real clone and push, and a Trivy scan. Pushes nothing.
+# a volume, the tokens mounted read-only, a real clone and push, and a Trivy scan. It then runs the
+# autosave service from the image against the server, so the service's Git options meet the
+# image's Git. Pushes nothing.
 set -euo pipefail
 
 image=${MNEME_IMAGE:-localhost/mneme:dev}
-limits=(--cpus 2 --memory 4g)
+# A log file of podman's own, since a journald log is not readable for every user.
+limits=(--cpus 2 --memory 4g --log-driver k8s-file)
 work=$(mktemp -d)
 volume=mneme-image-check-$$
 container=
+services=()
 cleanup() {
+  for service in "${services[@]}"; do podman rm -f "$service" >/dev/null 2>&1 || true; done
   if [ -n "$container" ]; then podman rm -f "$container" >/dev/null 2>&1 || true; fi
   podman volume rm -f "$volume" >/dev/null 2>&1 || true
   rm -rf "$work"
@@ -33,9 +38,12 @@ echo "mneme is static: $(readelf -hW "$work/mneme" | grep 'Type:' | xargs)"
 user=$(podman image inspect "$image" --format '{{.Config.User}}')
 [ "$user" = "65532:65532" ] || fail "the image runs as $user, not 65532:65532"
 
-token=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
-hash=$(printf %s "$token" | sha256sum | cut -d' ' -f1)
-printf '{ "check": "%s" }\n' "$hash" > "$work/tokens.json"
+new_token() { head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+hash() { printf %s "$1" | sha256sum | cut -d' ' -f1; }
+token=$(new_token)
+other_token=$(new_token)
+printf '{ "check": "%s", "other": "%s" }\n' "$(hash "$token")" "$(hash "$other_token")" \
+  > "$work/tokens.json"
 chmod 644 "$work/tokens.json"
 podman volume create "$volume" >/dev/null
 container=$(podman run -d "${limits[@]}" --read-only \
@@ -88,6 +96,71 @@ cd - >/dev/null
 pages=$(curl -fsS "$url/v1/pages")
 echo "GET /v1/pages: $pages"
 printf %s "$pages" | grep -q '"path":"check.md","title":"Image check"' || fail "/v1/pages lacks the pushed page"
+
+# The autosave service, run from the image as 65532 with its folder mapped to this user, on the
+# host's network so that it reaches the server's published port.
+printf %s "$token" > "$work/check.token"
+printf %s "$other_token" > "$work/other.token"
+mkdir "$work/folder-check" "$work/folder-other"
+autosave() {
+  local name=$1
+  shift
+  podman run "${limits[@]}" --read-only --network host --userns keep-id:uid=65532,gid=65532 \
+    -v "$work/folder-$name:/wiki" -v "$work/$name.token:/token:ro" "$@" \
+    --entrypoint mneme "$image" autosave "${autosave_command[@]}" \
+    --folder /wiki --server "$url" --token-file /token --name "$name" "${autosave_timing[@]}"
+}
+# Runs the service on a folder until it reports `outcome`, then stops it with SIGTERM.
+run_until() {
+  local name=$1 outcome=$2 service
+  autosave_command=(run)
+  autosave_timing=(--tick-seconds 0.2 --quiet-seconds 1 --fetch-seconds 1)
+  service=$(autosave "$name" -d)
+  services+=("$service")
+  for _ in $(seq 300); do
+    podman logs "$service" 2>&1 | grep -q "\"outcome\":\"$outcome\"" && break
+    [ "$(podman inspect "$service" --format '{{.State.Running}}')" = true ] \
+      || { podman logs "$service" >&2; fail "the service on $name stopped"; }
+    sleep 0.2
+  done
+  podman stop -t 30 "$service" >/dev/null
+  podman logs "$service" > "$work/$name.log" 2>&1
+  echo "autosave on $name: $(grep -o '"outcome":"[a-z]*"' "$work/$name.log" | cut -d'"' -f4 | xargs)"
+  grep -q "\"outcome\":\"$outcome\"" "$work/$name.log" || { cat "$work/$name.log" >&2; fail "$name never reported $outcome"; }
+  if grep -Eq '"outcome":"(blocked|stopped|offline)"' "$work/$name.log"; then
+    cat "$work/$name.log" >&2; fail "the service on $name was stuck"
+  fi
+  [ "$(podman inspect "$service" --format '{{.State.ExitCode}}')" = 0 ] || fail "the service on $name did not stop cleanly"
+  podman rm "$service" >/dev/null
+}
+# Dates a page a minute back, so that the service finds it quiet on its first tick.
+write_page() {
+  printf '%s' "$2" > "$1"
+  touch -d "@$(($(date +%s) - 60))" "$1"
+}
+autosave_command=(init)
+autosave_timing=()
+for name in check other; do autosave "$name" --rm; done
+[ -f "$work/folder-other/check.md" ] || fail "autosave init did not clone the wiki"
+echo "mneme autosave init cloned the wiki into two folders with $(podman exec "$container" git --version)"
+
+write_page "$work/folder-check/saved.md" $'# Saved\n\nThe first line.\n'
+run_until check pushed
+run_until other pulled
+grep -q 'The first line' "$work/folder-other/saved.md" || fail "the other folder did not fast-forward"
+echo "one save pushed from one folder and fast-forwarded into the other"
+
+write_page "$work/folder-check/saved.md" $'# Saved\n\nThe line from check.\n'
+write_page "$work/folder-other/saved.md" $'# Saved\n\nThe line from other.\n'
+run_until check pushed
+run_until other pushed
+git -C "$work/again" pull -q --ff-only
+grep -q 'The line from other' "$work/again/saved.md" || fail "the replayed side did not win the overlap"
+git -C "$work/again" log -1 --format=%B | grep -q '^Overlap: [0-9a-f]\{40\}$' || fail "the replay has no Overlap trailer"
+changes=$(curl -fsS "$url/v1/changes?limit=1")
+echo "GET /v1/changes?limit=1: $changes"
+printf %s "$changes" | grep -q '"overlap_author":"check"' || fail "the overlap does not name check's edit"
+echo "an overlapping edit was replayed and pushed with an Overlap trailer naming check's edit"
 
 podman save -q -o "$work/image.tar" "$image"
 trivy image --input "$work/image.tar" --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
