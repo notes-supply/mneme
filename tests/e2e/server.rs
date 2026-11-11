@@ -163,6 +163,23 @@ impl Server {
     pub fn log(&self) -> Vec<String> {
         self.log.lock().unwrap().clone()
     }
+
+    /// The log once a line holds `needle`. The server writes a line before it answers, but the
+    /// thread that reads its standard error can still be behind.
+    pub fn log_with(&self, needle: &str) -> Vec<String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let log = self.log();
+            if log.iter().any(|line| line.contains(needle)) {
+                return log;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no {needle:?} in {log:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 fn mneme_hash(token: &str) -> String {

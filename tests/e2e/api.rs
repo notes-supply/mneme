@@ -290,7 +290,7 @@ fn search_snippets_mark_the_matched_words() {
     assert_eq!(marked, ["quay"]);
     assert!(hit["score"].as_f64().unwrap() > 0.0);
     let requests: Vec<_> = server
-        .log()
+        .log_with(r#""event":"request""#)
         .into_iter()
         .filter(|line| line.contains(r#""event":"request""#))
         .collect();
