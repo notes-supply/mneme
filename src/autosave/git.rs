@@ -125,6 +125,17 @@ impl Git {
         command
     }
 
+    /// Clones `url` into the folder, which must be missing or empty.
+    pub fn clone_from(&self, url: &str) -> Result<Run> {
+        let mut command = self.command();
+        command
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .args(["clone", "--quiet", url])
+            .arg(&self.folder);
+        finish(command, &["clone"], &[])
+    }
+
     /// Runs `git` with `args`, `extra` variables and `input` on standard input.
     pub fn run_with(&self, args: &[&str], extra: &[(&str, &str)], input: &[u8]) -> Result<Run> {
         let mut command = self.command();

@@ -18,7 +18,7 @@ sha2 = "0.11.1"
 subtle = "2.6.1"
 similar = { version = "3.2.1", features = ["inline"] }
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["io-util", "net", "process", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1.54.1", features = ["io-util", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 
 [lints.rust]

@@ -31,6 +31,11 @@ struct Cli {
 enum Command {
     /// Serve the repository over HTTPS and the reading API.
     Serve(serve::Args),
+    /// Save, sync and push a wiki folder, so that writers only edit files.
+    Autosave {
+        #[command(subcommand)]
+        command: autosave::Command,
+    },
     /// Run a Git hook. The server installs it in the repository.
     Hook {
         #[command(subcommand)]
@@ -50,6 +55,7 @@ pub fn main() -> ExitCode {
         Command::Serve(args) => tokio::runtime::Runtime::new()
             .map_err(anyhow::Error::from)
             .and_then(|runtime| runtime.block_on(serve::run(args))),
+        Command::Autosave { command } => autosave::main(command),
         Command::Hook {
             hook: Hook::PreReceive,
         } => return hook::pre_receive(),

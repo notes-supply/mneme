@@ -2,6 +2,7 @@
 //! edit files. The service commits, fetches, replays and pushes, one tick at a time, and keeps
 //! nothing but the repository and what this module remembers between ticks.
 
+mod cli;
 mod folder;
 mod git;
 mod replay;
@@ -13,6 +14,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Result, bail};
 
 use crate::machines::Report;
+pub use cli::{Command, main};
 use folder::Folder;
 use git::Git;
 use replay::Local;

@@ -2,7 +2,7 @@
 
 use std::fs::{self, File};
 use std::path::Path;
-use std::process::Output;
+use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mneme::autosave::{Autosave, Config, Outcome, Token};
@@ -319,4 +319,101 @@ fn a_push_the_server_refuses_blocks_until_the_head_changes() {
     };
     assert!(again.contains("has a symlink at link.md"), "{again}");
     assert_eq!(wiki.pushes(), pushes + 1, "a new head is pushed once");
+}
+
+/// `mneme autosave init` with the token of `blackbox`.
+fn init(git: &Isolation, server: &Server, folder: &Path) -> Output {
+    let tokens = TempDir::new().unwrap();
+    let token_file = tokens.path().join("token");
+    fs::write(&token_file, format!("{}\n", MACHINES[1].1)).unwrap();
+    git.apply(
+        Command::new(env!("CARGO_BIN_EXE_mneme"))
+            .args(["autosave", "init", "--folder"])
+            .arg(folder)
+            .args(["--server", &server.url, "--token-file"])
+            .arg(&token_file)
+            .args(["--name", MACHINES[1].0]),
+    )
+    .output()
+    .unwrap()
+}
+
+fn assert_cloned(git: &Isolation, server: &Server, folder: &Path) {
+    assert!(folder.join("page-0.md").exists());
+    assert_eq!(
+        git.ok(folder, &["symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/main"
+    );
+    assert_eq!(
+        git.ok(folder, &["remote", "get-url", "origin"]).trim(),
+        server.git_url()
+    );
+    let config = fs::read_to_string(folder.join(".git/config")).unwrap();
+    assert!(
+        !config.contains(MACHINES[1].1),
+        "the token is not in the repository's config"
+    );
+}
+
+#[test]
+fn init_clones_into_a_missing_or_empty_folder() {
+    let wiki = Wiki::new();
+    let root = TempDir::new().unwrap();
+    let missing = root.path().join("deep/wiki");
+    let output = init(&wiki.git, &wiki.server, &missing);
+    assert!(output.status.success(), "{output:?}");
+    assert_cloned(&wiki.git, &wiki.server, &missing);
+
+    let empty = root.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    let output = init(&wiki.git, &wiki.server, &empty);
+    assert!(output.status.success(), "{output:?}");
+    assert_cloned(&wiki.git, &wiki.server, &empty);
+}
+
+#[test]
+fn init_adds_or_checks_the_origin_of_an_existing_repository() {
+    let wiki = Wiki::new();
+    let existing = TempDir::new().unwrap();
+    wiki.git.ok(existing.path(), &["init", "-q", "-b", "main"]);
+    fs::write(existing.path().join("mine.md"), "# Mine\n").unwrap();
+    let output = init(&wiki.git, &wiki.server, existing.path());
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        wiki.git
+            .ok(existing.path(), &["remote", "get-url", "origin"])
+            .trim(),
+        wiki.server.git_url()
+    );
+    assert_eq!(
+        fs::read_to_string(existing.path().join("mine.md")).unwrap(),
+        "# Mine\n"
+    );
+    let again = init(&wiki.git, &wiki.server, existing.path());
+    assert!(again.status.success(), "init can run again: {again:?}");
+
+    wiki.git.ok(
+        existing.path(),
+        &["remote", "set-url", "origin", "http://elsewhere/wiki.git"],
+    );
+    let output = init(&wiki.git, &wiki.server, existing.path());
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not http://"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn init_refuses_a_folder_with_files_that_is_not_a_repository() {
+    let wiki = Wiki::new();
+    let folder = TempDir::new().unwrap();
+    fs::write(folder.path().join("notes.md"), "# Notes\n").unwrap();
+    let output = init(&wiki.git, &wiki.server, folder.path());
+    assert!(!output.status.success());
+    assert!(!folder.path().join(".git").exists());
+    assert_eq!(
+        fs::read_to_string(folder.path().join("notes.md")).unwrap(),
+        "# Notes\n"
+    );
 }
