@@ -108,8 +108,6 @@ struct State {
     offline: Option<String>,
     /// A push found the server had moved, so the next tick fetches.
     stale: bool,
-    /// A head at which nothing was left to do until a fetch brings news.
-    settled: Option<String>,
     /// A head the server's push check refused, with its reason.
     refused: Option<(String, String)>,
     /// The last report the server took, and when.
@@ -211,18 +209,15 @@ impl Autosave {
             self.fetch(now, head.clone())?;
         }
         let mut blocked = None;
-        let unsettled = fetched || head.is_none() || self.state.settled != head;
-        if self.state.offline.is_none() && unsettled {
-            let (in_sync, refusal) = self.integrate_and_push(&mut head, &mut progress, dirty)?;
-            self.state.settled = head.clone().filter(|_| in_sync || refusal.is_some());
-            blocked = refusal;
+        if fetched && self.state.offline.is_none() {
+            blocked = self.integrate_and_push(&mut head, &mut progress, dirty)?;
+            if let Some((_, at)) = &mut self.state.fetched {
+                at.clone_from(&head);
+            }
         } else if let Some((refused, reason)) = &self.state.refused
             && head.as_ref() == Some(refused)
         {
             blocked = Some(reason.clone());
-        }
-        if fetched && let Some((_, at)) = &mut self.state.fetched {
-            at.clone_from(&head);
         }
         let outcome = match (stopped, blocked, &self.state.offline) {
             (Some(reason), _, _) => Outcome::Stopped(reason),
@@ -389,23 +384,24 @@ impl Autosave {
         })
     }
 
-    /// Brings in the server's commits and sends the local ones. Returns whether the folder
-    /// now holds the server's head, and the push check's refusal if there was one.
+    /// Brings in the server's commits and sends the local ones, right after a fetch so that
+    /// a replay is never built on an old view of the server. Returns the push check's refusal
+    /// if there was one.
     fn integrate_and_push(
         &mut self,
         head: &mut Option<String>,
         progress: &mut Progress,
         dirty: bool,
-    ) -> Result<(bool, Option<String>)> {
+    ) -> Result<Option<String>> {
         let origin = self.origin()?;
         let ahead = match self.shape(head.as_deref(), origin.as_deref())? {
             Shape::Same => false,
             Shape::Behind => {
                 let Some(target) = &origin else {
-                    return Ok((false, None));
+                    return Ok(None);
                 };
                 if !self.fast_forward(target)? {
-                    return Ok((false, None));
+                    return Ok(None);
                 }
                 head.clone_from(&origin);
                 *progress = (*progress).max(Progress::Pulled);
@@ -414,7 +410,7 @@ impl Autosave {
             Shape::Ahead => true,
             Shape::Diverged(commits) => {
                 if dirty || !self.integrate(head.as_deref(), origin.as_deref(), &commits)? {
-                    return Ok((false, None));
+                    return Ok(None);
                 }
                 *head = self.head()?;
                 *progress = (*progress).max(Progress::Pulled);
@@ -422,30 +418,30 @@ impl Autosave {
             }
         };
         let Some(local) = head.clone().filter(|_| ahead) else {
-            return Ok((true, None));
+            return Ok(None);
         };
         if let Some((refused, reason)) = &self.state.refused
             && *refused == local
         {
-            return Ok((false, Some(reason.clone())));
+            return Ok(Some(reason.clone()));
         }
         Ok(match self.push(&local)? {
             Push::Done => {
                 self.state.refused = None;
                 *progress = Progress::Pushed;
-                (true, None)
+                None
             }
             Push::Moved => {
                 self.state.stale = true;
-                (false, None)
+                None
             }
             Push::Refused(reason) => {
                 self.state.refused = Some((local, reason.clone()));
-                (false, Some(reason))
+                Some(reason)
             }
             Push::Failed(error) => {
                 self.state.offline = Some(error);
-                (false, None)
+                None
             }
         })
     }
