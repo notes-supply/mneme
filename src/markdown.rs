@@ -96,7 +96,8 @@ fn push_text<'a>(node: &'a AstNode<'a>, skip: Option<&'a AstNode<'a>>, text: &mu
 }
 
 /// The items of the lists between each "Open questions" heading and the next heading of the
-/// same or a higher level. A nested list is part of its item's text.
+/// same or a higher level. A nested list is part of its item's text, and a ticked task item is
+/// answered.
 fn questions<'a>(root: &'a AstNode<'a>) -> Vec<String> {
     let mut questions = Vec::new();
     for heading in root.descendants() {
@@ -112,6 +113,10 @@ fn questions<'a>(root: &'a AstNode<'a>) -> Vec<String> {
                 NodeValue::Heading(ref next) if next.level <= level => break,
                 NodeValue::List(_) => {
                     for item in block.children() {
+                        if matches!(item.data().value, NodeValue::TaskItem(ref task) if task.symbol.is_some())
+                        {
+                            continue;
+                        }
                         let mut text = String::new();
                         push_text(item, None, &mut text);
                         let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -173,7 +178,7 @@ mod tests {
         let page = visible(
             "# Plan\n\n- not a question\n\n##   Open Questions   \n\nIntro.\n\n\
              - Should we *move* the [harbour](h.md)?\n  It is\n  old.\n  - a detail\n\
-             - [ ] Who pays?\n-\n\n### Smaller\n\n1. Still under the heading?\n\n\
+             - [ ] Who pays?\n- [x] Who sails?\n- [X] Who rows?\n-\n\n### Smaller\n\n1. Still under the heading?\n\n\
              ## Next\n\n- not a question either\n\n### open questions\n\n- `code` too\n\n\
              # Top\n\n- outside\n",
         );

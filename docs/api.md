@@ -82,7 +82,7 @@ Example: [`changes.json`](../tests/fixtures/api/changes.json).
 
 The open questions of live pages, as `{ "total", "questions": [Question] }`: the most recently updated page first, and each page's questions in the order they appear on it. Parameters are `limit` and `offset`.
 
-A writer leaves a question as a list item under a heading named "Open questions", at any level, compared without case or surrounding space. Each top-level item between that heading and the next heading of the same or a higher level is one question. A nested list is part of its item's text, and an item with no text is left out.
+A writer leaves a question as a list item under a heading named "Open questions", at any level, compared without case or surrounding space. Each top-level item between that heading and the next heading of the same or a higher level is one question. A nested list is part of its item's text, and an item with no text is left out. A ticked task item (`- [x]`) is an answered question and is left out too. An unticked one (`- [ ]`) is open.
 
 A `Question` has `page`, which is `{ "id", "path", "title" }`, `text`, the item's visible text on one line, and `updated`, the page's `updated`. A page with very much markup, which search reads as raw Markdown, has no questions.
 
