@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -14,6 +14,7 @@ use axum::routing::get;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::oneshot;
 
 use crate::api::{self, ApiError};
 use crate::auth::Tokens;
@@ -23,6 +24,9 @@ use crate::index::Index;
 use crate::log;
 use crate::machines::Machines;
 use crate::repo::Repo;
+
+/// The longest a change to the machines' state waits before it is written.
+const SAVE_EVERY: Duration = Duration::from_secs(3);
 
 /// Where `mneme serve` finds its repository and listens.
 #[derive(Debug, clap::Args)]
@@ -103,10 +107,14 @@ pub async fn run(args: Args) -> Result<()> {
     git_version::check(Path::new("git"), "mneme serve")?;
     let mut terminate = signal(SignalKind::terminate()).context("watching for SIGTERM")?;
     let tokens = Tokens::load(&args.tokens)?;
-    let machines = Machines::new(tokens.names());
+    let names: Vec<String> = tokens.names().map(str::to_owned).collect();
     let path = args.repo;
     let wiki = tokio::task::spawn_blocking(move || -> Result<Wiki> {
         git_http::prepare(&path)?;
+        let machines = Machines::load(
+            names.iter().map(String::as_str),
+            path.join("mneme").join("machines.json"),
+        );
         let index = Index::build(&Repo::open(&path)?)?;
         log::emit("indexed", json!(index.status()?));
         Ok(Wiki {
@@ -117,6 +125,8 @@ pub async fn run(args: Args) -> Result<()> {
     })
     .await??;
     let wiki = Arc::new(wiki);
+    let (stop, stopped) = oneshot::channel();
+    let saving = tokio::spawn(save_machines(Arc::clone(&wiki), stopped));
     let listener = TcpListener::bind(args.addr)
         .await
         .with_context(|| format!("binding {}", args.addr))?;
@@ -129,8 +139,37 @@ pub async fn run(args: Args) -> Result<()> {
             }
         })
         .await?;
+    let _ = stop.send(());
+    saving.await?;
     log::emit("stopped", json!({}));
     Ok(())
+}
+
+/// Writes the machines' state every [`SAVE_EVERY`] when it changed, and once more when `stop`
+/// fires. It is the only writer of the state file.
+async fn save_machines(wiki: Arc<Wiki>, mut stop: oneshot::Receiver<()>) {
+    let mut every = tokio::time::interval(SAVE_EVERY);
+    loop {
+        let last = tokio::select! {
+            _ = every.tick() => false,
+            _ = &mut stop => true,
+        };
+        let saving = Arc::clone(&wiki);
+        let saved = tokio::task::spawn_blocking(move || saving.machines().save()).await;
+        if let Some(error) = saved
+            .map_err(anyhow::Error::from)
+            .and_then(|saved| saved)
+            .err()
+        {
+            log::emit(
+                "error",
+                json!({ "error": format!("saving the machines: {error:#}") }),
+            );
+        }
+        if last {
+            return;
+        }
+    }
 }
 
 fn router(wiki: Arc<Wiki>, tokens: Tokens) -> Router {

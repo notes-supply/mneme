@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::fs;
+use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -223,4 +226,106 @@ fn a_report_needs_a_token_and_a_well_formed_header() {
     let stored = machine(&server, "blackbox");
     assert_eq!(stored["state"], "idle");
     assert_eq!(stored["head"], Value::Null);
+}
+
+fn state_file(server: &Server) -> PathBuf {
+    server.repo().join("mneme").join("machines.json")
+}
+
+/// The log lines of the server's loading of the machines' state.
+fn loads(log: &[String]) -> Vec<Value> {
+    log.iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|line| line["event"] == "machines")
+        .collect()
+}
+
+#[test]
+fn machine_state_survives_a_restart_and_stays_out_of_git() {
+    let git = Isolation::new();
+    let server = Server::empty(&git);
+    let first = loads(&server.log_with(r#""event":"machines""#));
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(first[0]["loaded"], 0);
+    assert!(first[0]["error"].is_string(), "no file yet: {first:?}");
+
+    let work = clone_as(&server, "blackbox");
+    work.write("index.md", "# Home\n");
+    work.commit("Start");
+    let (ok, said) = work.push(&["origin", "main"]);
+    assert!(ok, "{said}");
+    let head = server_head(&server);
+    let body = json!({
+        "state": "blocked",
+        "detail": "a merge is in progress",
+        "head": head,
+        "skipped": [{ "path": "link.md", "reason": "a symlink" }],
+        "skipped_more": 1,
+    })
+    .to_string();
+    assert_eq!(send(&server, Some(&bearer("blackbox")), &body).status, 200);
+    let before = server.json("/v1/machines");
+    assert_eq!(machine(&server, "blackbox")["state"], "blocked");
+
+    let file = state_file(&server);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !fs::read_to_string(&file).is_ok_and(|text| text.contains("a merge is in progress")) {
+        assert!(
+            Instant::now() < deadline,
+            "the state is written within a few seconds without a stop"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let (status, log, server) = server.restart(&git);
+    assert!(status.success(), "{status}");
+    assert!(
+        log.last().unwrap().contains(r#""event":"stopped""#),
+        "{log:?}"
+    );
+    assert_eq!(
+        server.json("/v1/machines"),
+        before,
+        "the same state after a restart"
+    );
+    let again = loads(&server.log());
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert_eq!(again[0]["loaded"], 3);
+    assert_eq!(again[0]["error"], Value::Null);
+
+    let blob = git.ok(server.repo(), &["hash-object", file.to_str().unwrap()]);
+    let blob = blob.trim();
+    let refs = git.ok(server.repo(), &["for-each-ref", "--format=%(refname)"]);
+    assert_eq!(refs, "refs/heads/main\n", "the state is no ref");
+    let fresh = clone_as(&server, "aeolus");
+    for repo in [server.repo(), fresh.path()] {
+        let found = git.git(repo, &["cat-file", "-e", blob]);
+        assert!(!found.status.success(), "the state is no object");
+    }
+    assert_eq!(fresh.ok(&["ls-files"]), "index.md\n");
+    assert!(!fresh.path().join(".git").join("mneme").exists());
+}
+
+#[test]
+fn an_unreadable_state_file_means_no_machine_seen() {
+    let git = Isolation::new();
+    let server = Server::empty(&git);
+    let good = json!({
+        "state": "idle", "detail": "", "head": null, "skipped": [], "skipped_more": 0,
+    })
+    .to_string();
+    assert_eq!(send(&server, Some(&bearer("blackbox")), &good).status, 200);
+    let (_, _, server) = server.restart(&git);
+    assert_eq!(machine(&server, "blackbox")["state"], "idle");
+
+    fs::write(state_file(&server), "{ not json").unwrap();
+    let (status, _, server) = server.restart(&git);
+    assert!(status.success(), "{status}");
+    let blackbox = machine(&server, "blackbox");
+    assert_eq!(blackbox["state"], Value::Null);
+    assert_eq!(blackbox["reported"], Value::Null);
+    let lines = loads(&server.log());
+    assert_eq!(lines.len(), 1, "one line says why: {lines:?}");
+    assert_eq!(lines[0]["loaded"], 0);
+    assert!(lines[0]["error"].is_string(), "{lines:?}");
 }

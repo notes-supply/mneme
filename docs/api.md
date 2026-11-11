@@ -115,7 +115,7 @@ Example: [`search.json`](../tests/fixtures/api/search.json).
 
 ## `GET /v1/machines`
 
-Every machine in the tokens file, by name, as `{ "total", "machines": [Machine] }`. The server keeps this in memory, so it is empty again after a restart.
+Every machine in the tokens file, by name, as `{ "total", "machines": [Machine] }`. The server keeps this in `mneme/machines.json` inside the bare repository, so it survives a restart. A change is written within 3 seconds and at a clean stop, so a crash loses at most the last few seconds.
 
 A `Machine` has `name`, `seen` (when it last made a Git request with its token that carried no report, so its last fetch or push), `reported` (when its last report arrived), the `state`, `detail`, `head`, `skipped` and `skipped_more` of that report, and `current`, which is `true` when the reported head is the server's head. Every field but `name` and `current` is `null` until the machine has done that.
 

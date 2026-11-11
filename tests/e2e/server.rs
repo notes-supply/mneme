@@ -32,7 +32,7 @@ pub struct Server {
     repo: PathBuf,
     log: Arc<Mutex<Vec<String>>>,
     reader: Option<thread::JoinHandle<()>>,
-    _dirs: Vec<TempDir>,
+    dirs: Vec<TempDir>,
 }
 
 pub struct Reply {
@@ -168,7 +168,7 @@ impl Server {
             repo,
             log,
             reader: Some(reader),
-            _dirs: dirs,
+            dirs,
         }
     }
 
@@ -206,6 +206,18 @@ impl Server {
 
     /// Sends SIGTERM, waits for the server to exit, and returns its status and whole log.
     pub fn terminate(mut self) -> (ExitStatus, Vec<String>) {
+        self.stop()
+    }
+
+    /// Stops the server with SIGTERM and starts it again on the same repository. Returns the
+    /// stopped server's status and log.
+    pub fn restart(mut self, git: &Isolation) -> (ExitStatus, Vec<String>, Self) {
+        let (status, log) = self.stop();
+        let again = Self::spawn(self.repo.clone(), git, std::mem::take(&mut self.dirs));
+        (status, log, again)
+    }
+
+    fn stop(&mut self) -> (ExitStatus, Vec<String>) {
         let pid = self.child.id().to_string();
         let sent = Command::new("kill").args(["-TERM", &pid]).status().unwrap();
         assert!(sent.success());
