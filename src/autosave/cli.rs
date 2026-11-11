@@ -1,8 +1,8 @@
 //! `mneme autosave run` and `mneme autosave init`.
 
-use std::fs;
+use std::fs::{self, File, TryLockError};
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
@@ -108,9 +108,38 @@ impl Target {
     }
 }
 
+/// Takes the folder for this service alone, until the returned file is closed when the service
+/// exits. Two services on one folder would each commit and move it under the other.
+fn hold(folder: &Path) -> Result<File> {
+    let path = folder.join(".git").join("mneme-autosave.lock");
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| {
+            format!(
+                "opening {}. Is {} a clone? Run mneme autosave init first",
+                path.display(),
+                folder.display()
+            )
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => bail!(
+            "another mneme autosave run is already saving {}, and one folder takes one service",
+            folder.display()
+        ),
+        Err(TryLockError::Error(error)) => {
+            Err(error).with_context(|| format!("locking {}", path.display()))
+        }
+    }
+}
+
 /// Ticks until SIGTERM or Ctrl-C, and logs each change of outcome.
 fn serve(run: &Run) -> Result<()> {
     let config = run.target.config(Some(run))?;
+    let _held = hold(&config.folder)?;
     let pause = run.tick_seconds;
     log::emit(
         "started",

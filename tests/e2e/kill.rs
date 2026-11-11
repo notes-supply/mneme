@@ -213,6 +213,58 @@ fn wait_until_settled(
     }
 }
 
+/// A second service on a folder that one already saves exits at once and says why, and the
+/// first goes on.
+#[test]
+fn a_second_service_on_the_same_folder_exits() {
+    let git = Isolation::new();
+    let server = Server::empty(&git);
+    let root = TempDir::new().unwrap();
+    let folders = init_folders(&git, &server, root.path(), &[MACHINES[0]]);
+    let (folder, args) = &folders[0];
+    let first = Service::start(&git, args);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while outcomes(&first.log.lock().unwrap()).is_empty() {
+        assert!(Instant::now() < deadline, "the first service ticks");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let mut second = Service::start(&git, args);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = second.child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let log = second.kill();
+            panic!("the second service kept running: {log:?}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!status.success());
+    second.reader.take().unwrap().join().unwrap();
+    let said = second.log.lock().unwrap().join("\n");
+    assert!(said.contains("already"), "{said}");
+    assert!(said.contains(folder.to_str().unwrap()), "{said}");
+    assert!(
+        outcomes(&second.log.lock().unwrap()).is_empty(),
+        "it never ticked"
+    );
+
+    fs::write(folder.join("after.md"), "# After\n").unwrap();
+    let head = || {
+        git.git(server.repo(), &["rev-parse", "-q", "--verify", "main"])
+            .stdout
+    };
+    let before = head();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while head() == before {
+        assert!(Instant::now() < deadline, "the first service still saves");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let (status, _) = first.terminate();
+    assert!(status.success(), "{status}");
+}
+
 /// Each folder writes only its own pages, so in the end the server must hold exactly what the
 /// test last wrote in both: nothing lost, and nothing deleted come back.
 #[test]
