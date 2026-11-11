@@ -1,6 +1,6 @@
 # Reading API
 
-Every route is `GET`, lives under `/v1`, and answers with JSON. There is no authentication at this layer; the network keeps it private.
+Every route is `GET`, lives under `/v1`, and answers with JSON. There is no authentication at this layer; the network keeps it private. The one route that writes, `POST /git/status`, sits beside the Git routes and needs a machine's token. It is described [at the end](#post-gitstatus).
 
 Each route has one example response in `tests/fixtures/api/`. The tests check every real response against the shape of its example, both ways, so the frontend can test against the same files. To write them again from a real server, run `MNEME_WRITE_EXAMPLES=1 cargo nextest run every_route`.
 
@@ -96,3 +96,29 @@ Visible text is what a reader sees: link text but not link targets, code, and no
 `sort`, `order`, `limit`, `offset` and the filters of `/v1/pages` apply as well. The default sort is by `score`, best first.
 
 Example: [`search.json`](../tests/fixtures/api/search.json).
+
+## `GET /v1/machines`
+
+Every machine in the tokens file, by name, as `{ "total", "machines": [Machine] }`. The server keeps this in memory, so it is empty again after a restart.
+
+A `Machine` has `name`, `seen` (when it last made a Git request with its token), `reported` (when its last report arrived), the `state`, `detail` and `head` of that report, and `current`, which is `true` when the reported head is the server's head. Every field but `name` and `current` is `null` until the machine has done that.
+
+Example: [`machines.json`](../tests/fixtures/api/machines.json).
+
+## `POST /git/status`
+
+An autosave service reports its state, with `Authorization: Bearer <token>` and a JSON body `{ "state", "detail", "head" }`. `state` is a short word such as `idle` or `blocked`, `detail` says why or is empty, and `head` is the clone's `main` as a full commit id, or `null`. The answer is `204` with no body. A request without the right token is `401` with no body, a body that is not JSON is `400`, a body with missing or unknown fields or bad values is `422`, and a body over 4 KiB is `413`, each with `{ "error" }`. A report is not a Git request, so it leaves `seen` as it was.
+
+The autosave service sends these states. The detail is empty unless the list says otherwise.
+
+| `state` | Meaning |
+| --- | --- |
+| `idle` | nothing to do |
+| `saved` | it committed the folder's changes |
+| `pulled` | it brought in changes from the server |
+| `pushed` | the server has its commits |
+| `offline` | it cannot reach the server; `detail` is Git's error |
+| `blocked` | it waits on the folder and changes nothing; `detail` says why |
+| `stopped` | it refused a save that would delete most pages; `detail` says how many |
+
+Example request body: [`report.json`](../tests/fixtures/api/report.json).

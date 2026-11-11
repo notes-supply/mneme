@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::git::{self, Work};
 use crate::history::{assert_versions_match_git, events, live_page};
-use crate::server::Server;
+use crate::server::{AUTHORIZATION, Server};
 
 fn id(page: &Value) -> &str {
     page["id"].as_str().unwrap()
@@ -403,6 +403,20 @@ fn every_route_answers_in_the_shape_of_its_example_file() {
         .unwrap()
         .to_owned();
     let alpha = id(&alpha);
+    let extra = format!("http.extraHeader={AUTHORIZATION}");
+    work.ok(&["-c", &extra, "ls-remote", &server.git_url()]);
+    let reply = server.post(
+        "/git/status",
+        &[
+            (
+                "authorization",
+                AUTHORIZATION.trim_start_matches("Authorization: "),
+            ),
+            ("content-type", "application/json"),
+        ],
+        &fs::read(examples().join("report.json")).unwrap(),
+    );
+    assert_eq!(reply.status, 204, "{}", reply.body);
     let routes = [
         ("status", "/v1/status".to_owned()),
         ("pages", "/v1/pages?deleted=true".to_owned()),
@@ -412,6 +426,7 @@ fn every_route_answers_in_the_shape_of_its_example_file() {
         ("diff", format!("/v1/pages/{alpha}/diff")),
         ("changes", "/v1/changes".to_owned()),
         ("search", "/v1/search?q=harbours".to_owned()),
+        ("machines", "/v1/machines".to_owned()),
     ];
     for (name, path) in routes {
         let actual = server.json(&path);

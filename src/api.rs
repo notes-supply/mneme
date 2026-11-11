@@ -1,7 +1,6 @@
 //! The reading API: `GET` routes under `/v1` that answer with JSON.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{FromRequestParts, Path, Query, Request, State};
@@ -20,9 +19,10 @@ use sha2::{Digest, Sha256};
 use crate::index::{
     Filter, Hit, Listing, Missing, Order, Page, PageId, QueryError, Sort, Status, Version, Window,
 };
+use crate::machines::Health;
 use crate::serve::Wiki;
 use crate::text::{self, DiffLine};
-use crate::{index, log};
+use crate::{index, log, now};
 
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 500;
@@ -38,6 +38,7 @@ pub fn router(wiki: Arc<Wiki>) -> Router {
         .route("/v1/pages/{id}/diff", get(diff))
         .route("/v1/changes", get(changes))
         .route("/v1/search", get(search))
+        .route("/v1/machines", get(machines))
         .fallback(|| async { ApiError::NotFound("no such route".to_owned()) })
         .layer(middleware::from_fn(etag))
         .with_state(wiki)
@@ -193,14 +194,14 @@ struct SearchBody {
     hits: Vec<Hit>,
 }
 
-fn limit(limit: Option<u32>) -> u32 {
-    limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT)
+#[derive(Serialize)]
+struct MachinesBody {
+    total: usize,
+    machines: Vec<Health>,
 }
 
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs().try_into().unwrap_or(i64::MAX))
+fn limit(limit: Option<u32>) -> u32 {
+    limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT)
 }
 
 async fn status(State(wiki): State<Arc<Wiki>>) -> Result<Json<Status>, ApiError> {
@@ -327,6 +328,15 @@ async fn search(
         .read(move |_, index| index.search(&query, &listing))
         .await?;
     Ok(Json(SearchBody { total, hits }))
+}
+
+async fn machines(State(wiki): State<Arc<Wiki>>) -> Result<Json<MachinesBody>, ApiError> {
+    let head = wiki.read(|_, index| Ok(index.status()?.head)).await?;
+    let machines = wiki.machines().list(head.as_deref());
+    Ok(Json(MachinesBody {
+        total: machines.len(),
+        machines,
+    }))
 }
 
 /// A strong `ETag` from the hash of the body, and 304 when the client has it already.

@@ -6,15 +6,16 @@ use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Request, State};
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::header::{
     AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, WWW_AUTHENTICATE,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
+use axum::routing::{any, post};
+use axum::{Json, Router};
 use futures_util::StreamExt;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -22,8 +23,9 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 
 use crate::auth::Tokens;
+use crate::machines::Report;
 use crate::serve::Wiki;
-use crate::{hook, log};
+use crate::{hook, log, now};
 
 const PREFIX: &str = "/git/wiki.git";
 /// The largest request body, a pack included.
@@ -31,6 +33,8 @@ const MAX_BODY: u64 = 64 << 20;
 const MAX_HEADERS: usize = 64 << 10;
 /// How much of the child's standard error is logged. The rest is read and dropped.
 const MAX_STDERR: u64 = 16 << 10;
+/// The largest state report.
+const MAX_REPORT: usize = 4 << 10;
 
 /// The machine a Git request came from, for the request log.
 #[derive(Clone, Debug)]
@@ -42,7 +46,8 @@ struct Git {
     tokens: Arc<Tokens>,
 }
 
-/// The smart HTTP routes. Every request needs a machine's token.
+/// The smart HTTP routes, and the route where an autosave service reports its state. Every
+/// request needs a machine's token.
 pub fn router(wiki: Arc<Wiki>, tokens: Tokens) -> Router {
     let git = Git {
         wiki,
@@ -52,6 +57,10 @@ pub fn router(wiki: Arc<Wiki>, tokens: Tokens) -> Router {
         .route(&format!("{PREFIX}/info/refs"), any(backend))
         .route(&format!("{PREFIX}/git-upload-pack"), any(backend))
         .route(&format!("{PREFIX}/git-receive-pack"), any(backend))
+        .route(
+            "/git/status",
+            post(status).layer(DefaultBodyLimit::max(MAX_REPORT)),
+        )
         .with_state(git)
 }
 
@@ -92,14 +101,44 @@ fn run(command: &mut StdCommand) -> Result<()> {
     Ok(())
 }
 
+fn unauthorized() -> Response {
+    (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, "Bearer")]).into_response()
+}
+
+/// Stores a machine's report. A request without the right token is 401 whatever its body is.
+async fn status(
+    State(git): State<Git>,
+    headers: HeaderMap,
+    body: Result<Json<Report>, JsonRejection>,
+) -> Response {
+    let Some(machine) = git.tokens.machine(headers.get(AUTHORIZATION)) else {
+        return unauthorized();
+    };
+    let refuse = |status, error: &str| (status, Json(json!({ "error": error }))).into_response();
+    let report = match body {
+        Ok(Json(report)) => report,
+        Err(rejection) => return refuse(rejection.status(), &rejection.body_text()),
+    };
+    if let Some(problem) = report.problem() {
+        return refuse(StatusCode::UNPROCESSABLE_ENTITY, problem);
+    }
+    git.wiki.machines().report(machine, report, now());
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response
+        .extensions_mut()
+        .insert(Machine(machine.to_owned()));
+    response
+}
+
 async fn backend(State(git): State<Git>, request: Request) -> Response {
     let Some(machine) = git
         .tokens
         .machine(request.headers().get(AUTHORIZATION))
         .map(str::to_owned)
     else {
-        return (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, "Bearer")]).into_response();
+        return unauthorized();
     };
+    git.wiki.machines().saw(&machine, now());
     let too_large = request
         .headers()
         .get(CONTENT_LENGTH)

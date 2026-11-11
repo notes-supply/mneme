@@ -1,0 +1,32 @@
+{
+  "machines": [
+    {
+      "current": false,
+      "detail": null,
+      "head": null,
+      "name": "aeolus",
+      "reported": null,
+      "seen": null,
+      "state": null
+    },
+    {
+      "current": true,
+      "detail": "a merge is in progress",
+      "head": "faf510a1fb457f1af5496ca64dea77ed68ddb2f8",
+      "name": "blackbox",
+      "reported": 1794389925,
+      "seen": 1794389925,
+      "state": "blocked"
+    },
+    {
+      "current": false,
+      "detail": null,
+      "head": null,
+      "name": "cassia",
+      "reported": null,
+      "seen": null,
+      "state": null
+    }
+  ],
+  "total": 3
+}

@@ -43,6 +43,11 @@ impl Tokens {
         Ok(Self { machines })
     }
 
+    /// The name of every machine, in order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.machines.iter().map(|(machine, _)| machine.as_str())
+    }
+
     /// The machine whose token is in an `Authorization: Bearer` header. Every stored hash is
     /// compared, in constant time.
     #[must_use]

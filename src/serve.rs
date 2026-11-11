@@ -20,6 +20,7 @@ use crate::auth::Tokens;
 use crate::git_http::{self, Machine};
 use crate::index::Index;
 use crate::log;
+use crate::machines::Machines;
 use crate::repo::Repo;
 
 /// Where `mneme serve` finds its repository and listens.
@@ -36,11 +37,12 @@ pub struct Args {
     pub addr: SocketAddr,
 }
 
-/// The repository and its index, shared by every request. Each blocking task opens the
-/// repository itself, since a gix repository stays on one thread.
+/// The repository, its index and the machines that write to it, shared by every request.
+/// Each blocking task opens the repository itself, since a gix repository stays on one thread.
 pub struct Wiki {
     path: PathBuf,
     index: Mutex<Index>,
+    machines: Machines,
 }
 
 impl Wiki {
@@ -48,6 +50,12 @@ impl Wiki {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// What each machine last did and said.
+    #[must_use]
+    pub fn machines(&self) -> &Machines {
+        &self.machines
     }
 
     /// Adds new commits on main to the index. Returns how many there were.
@@ -93,6 +101,7 @@ impl Wiki {
 pub async fn run(args: Args) -> Result<()> {
     let mut terminate = signal(SignalKind::terminate()).context("watching for SIGTERM")?;
     let tokens = Tokens::load(&args.tokens)?;
+    let machines = Machines::new(tokens.names());
     let path = args.repo;
     let wiki = tokio::task::spawn_blocking(move || -> Result<Wiki> {
         git_http::prepare(&path)?;
@@ -101,6 +110,7 @@ pub async fn run(args: Args) -> Result<()> {
         Ok(Wiki {
             path,
             index: Mutex::new(index),
+            machines,
         })
     })
     .await??;

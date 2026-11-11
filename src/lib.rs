@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -12,6 +13,7 @@ pub mod git_http;
 pub mod hook;
 pub mod index;
 pub mod log;
+pub mod machines;
 pub mod markdown;
 pub mod repo;
 pub mod serve;
@@ -58,6 +60,13 @@ pub fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The time in seconds since the Unix epoch.
+pub(crate) fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs().try_into().unwrap_or(i64::MAX))
 }
 
 /// Lowercase hexadecimal.

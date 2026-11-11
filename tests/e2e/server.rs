@@ -15,9 +15,15 @@ use ureq::Agent;
 
 use crate::git::{Isolation, Work};
 
-/// The token of the machine `blackbox`, the one machine the test servers know.
+/// The token of the machine `blackbox`.
 pub const TOKEN: &str = "test-token-of-blackbox";
 pub const AUTHORIZATION: &str = "Authorization: Bearer test-token-of-blackbox";
+/// Every machine the test servers know, with its token.
+pub const MACHINES: [(&str, &str); 3] = [
+    ("aeolus", "test-token-of-aeolus"),
+    ("blackbox", TOKEN),
+    ("cassia", "test-token-of-cassia"),
+];
 
 pub struct Server {
     child: Child,
@@ -70,9 +76,12 @@ impl Server {
     /// Starts the server on `repo`, with `git` isolated as the tests' own commands are.
     fn spawn(repo: PathBuf, git: &Isolation, mut dirs: Vec<TempDir>) -> Self {
         let tokens = TempDir::new().unwrap();
-        let hash = mneme_hash(TOKEN);
+        let hashes: serde_json::Map<String, Value> = MACHINES
+            .iter()
+            .map(|(machine, token)| ((*machine).to_owned(), mneme_hash(token).into()))
+            .collect();
         let file = tokens.path().join("tokens.json");
-        fs::write(&file, format!(r#"{{ "blackbox": "{hash}" }}"#)).unwrap();
+        fs::write(&file, Value::Object(hashes).to_string()).unwrap();
         dirs.push(tokens);
         let mut command = Command::new(env!("CARGO_BIN_EXE_mneme"));
         command

@@ -33,3 +33,9 @@ Choices made while building Mneme that the design brief left open or that differ
 - **A body over 64 MiB** is refused with 413 when its length is declared, and cut off when it is streamed.
 - **The push check also refuses a deletion of `main`,** before `receive.denyDeletes` would, and compares `.git` without case, since clones on macOS and Windows read `.GIT` as `.git`.
 - **Git checks every pushed object** (`receive.fsckObjects`). It refuses tree entries named `.` or `..`, and every name that HFS+ or NTFS reads as `.git` (`.GIT`, `git~1`), before the push check runs. The push check's own `.git` comparison stays as a second line.
+
+## Machine status
+
+- **`seen` counts Git requests only.** A report leaves it alone, so a service that still reports but no longer syncs shows its last sync.
+- **A machine also has `reported`,** the time its last report arrived, which the brief did not list. A blocked service makes no Git requests, so without it a blocked service that still reports would look like a stopped one.
+- **A report is checked at the door.** `state` is 1 to 64 bytes, `detail` at most 1 KiB, `head` a full lowercase commit id or `null`, and no other field. A body that is not JSON is `400`, one of the wrong shape or with a bad value `422`, and one over 4 KiB `413`, as axum answers them.
