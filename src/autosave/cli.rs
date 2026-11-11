@@ -36,17 +36,25 @@ pub struct Run {
     #[command(flatten)]
     pub target: Target,
     /// Seconds between ticks.
-    #[arg(long, default_value_t = 5.0)]
-    pub tick_seconds: f64,
+    #[arg(long, default_value = "5", value_parser = seconds)]
+    pub tick_seconds: Duration,
     /// Seconds every changed file must have been still before a save.
-    #[arg(long, default_value_t = 15.0)]
-    pub quiet_seconds: f64,
+    #[arg(long, default_value = "15", value_parser = seconds)]
+    pub quiet_seconds: Duration,
     /// Seconds between fetches when nothing else asks for one.
-    #[arg(long, default_value_t = 30.0)]
-    pub fetch_seconds: f64,
+    #[arg(long, default_value = "30", value_parser = seconds)]
+    pub fetch_seconds: Duration,
     /// Seconds between reports of a state that has not changed.
-    #[arg(long, default_value_t = 300.0)]
-    pub report_seconds: f64,
+    #[arg(long, default_value = "300", value_parser = seconds)]
+    pub report_seconds: Duration,
+}
+
+/// A number of seconds, which may have a fraction, as a duration.
+fn seconds(text: &str) -> Result<Duration, String> {
+    let value: f64 = text
+        .parse()
+        .map_err(|_| format!("{text} is not a number"))?;
+    Duration::try_from_secs_f64(value).map_err(|_| format!("{text} is not a number of seconds"))
 }
 
 /// What `mneme autosave` does.
@@ -79,17 +87,17 @@ impl Target {
         if token.is_empty() {
             bail!("the token file {} is empty", self.token_file.display());
         }
-        let seconds = |value: Option<f64>, default: u64| {
-            value.map_or(Duration::from_secs(default), Duration::from_secs_f64)
+        let timing = |pick: fn(&Run) -> Duration, default: u64| {
+            run.map_or(Duration::from_secs(default), pick)
         };
         Ok(Config {
             folder: self.folder.clone(),
             server: self.server.trim_end_matches('/').to_owned(),
             token: Token(token.to_owned()),
             machine: self.name.clone(),
-            quiet: seconds(run.map(|run| run.quiet_seconds), 15),
-            fetch_every: seconds(run.map(|run| run.fetch_seconds), 30),
-            report_every: seconds(run.map(|run| run.report_seconds), 300),
+            quiet: timing(|run| run.quiet_seconds, 15),
+            fetch_every: timing(|run| run.fetch_seconds, 30),
+            report_every: timing(|run| run.report_seconds, 300),
         })
     }
 }
@@ -97,7 +105,7 @@ impl Target {
 /// Ticks until SIGTERM or Ctrl-C, and logs each change of outcome.
 fn serve(run: &Run) -> Result<()> {
     let config = run.target.config(Some(run))?;
-    let pause = Duration::from_secs_f64(run.tick_seconds);
+    let pause = run.tick_seconds;
     log::emit(
         "started",
         json!({
