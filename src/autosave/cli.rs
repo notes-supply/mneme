@@ -239,29 +239,48 @@ fn serve(run: &Run) -> Result<()> {
     })
 }
 
+/// What making a folder ready did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ready {
+    /// The folder was missing or empty, and is a clone now.
+    Cloned,
+    /// The folder was a clone of the remote already.
+    Checked,
+    /// A folder of files became a repository, and the service's first save pushes them.
+    Adopted,
+}
+
+/// `mneme autosave init`, which logs what it did as a JSON line, as the service does.
 fn init(target: &Target) -> Result<()> {
     let config = target.config(None)?;
     git_version::check(&config.git, "mneme autosave")?;
-    ready(&Git::new(&config), false)
+    let fields = match ready(&Git::new(&config), false)? {
+        Ready::Cloned => json!({ "folder": config.folder, "cloned": true }),
+        Ready::Checked => json!({ "folder": config.folder, "cloned": false }),
+        Ready::Adopted => json!({ "folder": config.folder, "cloned": false, "adopted": true }),
+    };
+    log::emit("initialized", fields);
+    Ok(())
 }
 
 /// Makes the folder ready for the service of `config`, as `mneme autosave init` does, and also
 /// takes a folder of files that is not a repository yet when the remote has no `main`, for
-/// `mneme init`.
+/// `mneme init`, which says what it did in a sentence of its own.
 ///
 /// # Errors
 ///
 /// Fails when Git is too old, or the folder cannot be made ready without deleting or
 /// overwriting a file.
-pub(crate) fn prepare(config: &Settings) -> Result<()> {
+pub(crate) fn prepare(config: &Settings) -> Result<Ready> {
     git_version::check(&config.git, "mneme init")?;
     ready(&Git::new(config), true)
 }
 
 /// Clones into a missing or empty folder, or checks an existing clone. With `adopt`, a folder
 /// of files that is not a repository becomes one on `main` when the remote has no `main` yet,
-/// so that the first save commits the files and pushes them.
-fn ready(git: &Git, adopt: bool) -> Result<()> {
+/// so that the first save commits the files and pushes them. Logs nothing: the caller says
+/// what happened.
+fn ready(git: &Git, adopt: bool) -> Result<Ready> {
     let url = git.url();
     let path = git.folder();
     let empty = match fs::read_dir(path) {
@@ -295,8 +314,7 @@ fn ready(git: &Git, adopt: bool) -> Result<()> {
         if !git.run(&["rev-parse", "-q", "--verify", "HEAD"])?.success {
             git.ok(&["symbolic-ref", "HEAD", "refs/heads/main"])?;
         }
-        log::emit("initialized", json!({ "folder": path, "cloned": true }));
-        return Ok(());
+        return Ok(Ready::Cloned);
     }
     if !git.git_dir().is_dir() {
         if adopt && git.git_dir().symlink_metadata().is_err() {
@@ -323,13 +341,12 @@ fn ready(git: &Git, adopt: bool) -> Result<()> {
     if branch != "refs/heads/main" {
         bail!("the folder is not on main. Check out main first");
     }
-    log::emit("initialized", json!({ "folder": path, "cloned": false }));
-    Ok(())
+    Ok(Ready::Checked)
 }
 
 /// Makes a folder of files a repository on `main` with `origin` set, when the remote has no
 /// `main` yet. No file is touched.
-fn adopt_files(git: &Git) -> Result<()> {
+fn adopt_files(git: &Git) -> Result<Ready> {
     let url = git.url();
     let path = git.folder();
     let asked = git.ask_remote()?;
@@ -349,9 +366,5 @@ fn adopt_files(git: &Git) -> Result<()> {
         bail!("git init failed: {}", run.error());
     }
     git.ok(&["remote", "add", "origin", url])?;
-    log::emit(
-        "initialized",
-        json!({ "folder": path, "cloned": false, "adopted": true }),
-    );
-    Ok(())
+    Ok(Ready::Adopted)
 }

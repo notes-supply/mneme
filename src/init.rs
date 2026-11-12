@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::autosave::{self, Remote, RemoteArgs, Settings};
+use crate::autosave::{self, Ready, Remote, RemoteArgs, Settings};
 
 /// The unit's name, and its file's.
 const UNIT: &str = "mneme-autosave.service";
@@ -71,7 +71,7 @@ pub fn run(args: &Args) -> Result<()> {
         }
         _ => None,
     };
-    autosave::prepare(&Settings {
+    let ready = autosave::prepare(&Settings {
         folder: folder.clone(),
         remote,
         machine: name,
@@ -81,7 +81,15 @@ pub fn run(args: &Args) -> Result<()> {
         stale_lock: Duration::from_secs(300),
         git: PathBuf::from("git"),
     })?;
-    println!("{} is ready.", folder.display());
+    match ready {
+        Ready::Cloned => println!("Cloned the wiki into {}.", folder.display()),
+        Ready::Checked => println!("{} is a clone of the wiki already.", folder.display()),
+        Ready::Adopted => println!(
+            "{} is a Git repository now, and the service's first save commits its files and \
+             pushes them.",
+            folder.display()
+        ),
+    }
     let Some((systemctl, path, text)) = unit else {
         if systemctl.is_none() {
             println!("systemctl is not on PATH, so no service is installed.");

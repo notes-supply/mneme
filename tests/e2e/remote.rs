@@ -140,6 +140,10 @@ fn a_path_remote_is_cloned_and_saved_to_by_the_service() {
     let init = mneme(&git, &bin).args(args("init")).output().unwrap();
     assert!(init.status.success(), "{init:?}");
     assert!(folder.join("notes.md").exists(), "init cloned the wiki");
+    let initialized: Value = serde_json::from_slice(&init.stderr).unwrap();
+    assert_eq!(initialized["event"], "initialized", "{init:?}");
+    assert_eq!(initialized["cloned"], true, "{init:?}");
+    assert_eq!(initialized["folder"], folder.to_str().unwrap(), "{init:?}");
     assert_eq!(
         git.ok(&folder, &["remote", "get-url", "origin"]).trim(),
         url

@@ -99,6 +99,11 @@ fn init_clones_writes_the_unit_with_absolute_paths_and_starts_the_service() {
     let output = machine.init(&args);
     assert!(output.status.success(), "{output:?}");
     assert!(folder.join("notes.md").exists(), "the wiki was cloned");
+    assert!(
+        stdout(&output).starts_with(&format!("Cloned the wiki into {folder_arg}.\n")),
+        "{output:?}"
+    );
+    assert_eq!(stderr(&output), "", "a person reads no log lines");
     assert_eq!(
         machine.systemctl(),
         "--user daemon-reload\n--user enable --now mneme-autosave.service\n"
@@ -128,6 +133,11 @@ fn init_clones_writes_the_unit_with_absolute_paths_and_starts_the_service() {
 
     let again = machine.init(&args);
     assert!(again.status.success(), "init can run again: {again:?}");
+    assert!(
+        stdout(&again).starts_with(&format!("{folder_arg} is a clone of the wiki already.\n")),
+        "{again:?}"
+    );
+    assert_eq!(stderr(&again), "");
     assert_eq!(machine.unit(), unit);
     assert_eq!(
         machine.systemctl(),
@@ -245,6 +255,11 @@ fn init_takes_a_folder_of_files_when_the_remote_has_no_main_and_refuses_otherwis
         "--no-service",
     ]);
     assert!(output.status.success(), "{output:?}");
+    assert!(
+        stdout(&output).contains("is a Git repository now, and the service's first save"),
+        "{output:?}"
+    );
+    assert_eq!(stderr(&output), "");
     assert_eq!(
         git.ok(&folder, &["symbolic-ref", "HEAD"]).trim(),
         "refs/heads/main"
