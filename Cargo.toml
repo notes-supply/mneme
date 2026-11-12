@@ -2,6 +2,7 @@
 name = "mneme"
 version = "0.1.0"
 edition = "2024"
+description = "Autosave for a Markdown wiki in Git, with an optional server and reading API"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/notes-supply/mneme"
 publish = false
