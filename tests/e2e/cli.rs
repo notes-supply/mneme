@@ -1,9 +1,11 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
+
+use crate::git::real_git;
 
 #[test]
 fn an_unknown_subcommand_is_refused() {
@@ -37,14 +39,6 @@ fn autosave_refuses_a_number_of_seconds_that_is_not_one() {
             "{value}"
         );
     }
-}
-
-/// The real `git` on `PATH`.
-fn real_git() -> PathBuf {
-    std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|dir| dir.join("git"))
-        .find(|path| path.is_file())
-        .unwrap()
 }
 
 /// `mneme` with a `git` first on `PATH` that says it is `version` and passes every other command

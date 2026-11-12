@@ -576,13 +576,57 @@ fn every_route_answers_in_the_shape_of_its_example_file() {
         ("machines", "/v1/machines".to_owned()),
     ];
     for (name, path) in routes {
-        let actual = server.json(&path);
-        if std::env::var_os("MNEME_WRITE_EXAMPLES").is_some() {
-            let pretty = serde_json::to_string_pretty(&actual).unwrap();
-            fs::write(examples().join(format!("{name}.json")), pretty + "\n").unwrap();
-        }
-        let example = example(name);
-        assert_eq!(misfit(&actual, &example, name), None);
-        assert_eq!(misfit(&example, &actual, name), None);
+        fits_example(name, &server.json(&path));
     }
+}
+
+/// Checks `actual` against the example `name` both ways, after writing it there when
+/// `MNEME_WRITE_EXAMPLES` is set.
+fn fits_example(name: &str, actual: &Value) {
+    if std::env::var_os("MNEME_WRITE_EXAMPLES").is_some() {
+        let pretty = serde_json::to_string_pretty(actual).unwrap();
+        fs::write(examples().join(format!("{name}.json")), pretty + "\n").unwrap();
+    }
+    let example = example(name);
+    assert_eq!(misfit(actual, &example, name), None);
+    assert_eq!(misfit(&example, actual, name), None);
+}
+
+#[test]
+fn every_editing_route_answers_in_the_shape_of_its_example_file() {
+    let work = git::standard();
+    let server = Server::of(&work);
+    let author = json!({ "name": "Ada Writer", "email": "ada@example.invalid" });
+    let send = |method: &str, path: &str, body: &Value, status: u16| {
+        let authorization = AUTHORIZATION.trim_start_matches("Authorization: ");
+        let headers = [
+            ("authorization", authorization),
+            ("content-type", "application/json"),
+        ];
+        let reply = server.request(method, path, &headers, body.to_string().as_bytes());
+        assert_eq!(reply.status, status, "{method} {path}: {}", reply.body);
+        reply.json()
+    };
+    let body = json!({ "markdown": "# Tide\n\nHigh at noon.\n", "base": null, "author": author });
+    let created = send("PUT", "/v1/paths/notes/tide.md", &body, 201);
+    fits_example("edit", &created);
+    let body = json!({ "markdown": "# Tide\n", "base": null, "author": author });
+    fits_example(
+        "conflict",
+        &send("PUT", "/v1/paths/notes/tide.md", &body, 409),
+    );
+    let body = json!({
+        "from": "notes/tide.md",
+        "to": "notes/tides.md",
+        "base": created["commit"],
+        "author": author,
+        "message": "Name the tides",
+    });
+    let moved = send("POST", "/v1/moves", &body, 200);
+    fits_example("move", &moved);
+    let body = json!({ "base": moved["commit"], "author": author });
+    fits_example(
+        "deletion",
+        &send("DELETE", "/v1/paths/notes/tides.md", &body, 200),
+    );
 }

@@ -39,6 +39,8 @@ pub struct Options {
     pub tokens_env: bool,
     /// `--private-api`: every `/v1` route asks for a token.
     pub private_api: bool,
+    /// A folder to put first on the server's `PATH`, such as one with a `git` of a test's own.
+    pub path: Option<PathBuf>,
 }
 
 pub struct Server {
@@ -179,6 +181,15 @@ impl Server {
         }
         if options.private_api {
             command.arg("--private-api");
+        }
+        if let Some(first) = &options.path {
+            let path = std::env::join_paths(
+                [first.clone()]
+                    .into_iter()
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap();
+            command.env("PATH", path);
         }
         command.arg("--repo").arg(&repo);
         let mut server = Self::launch(&mut command, repo, dirs);

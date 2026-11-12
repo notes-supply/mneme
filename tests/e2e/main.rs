@@ -1,6 +1,7 @@
 mod api;
 mod autosave;
 mod cli;
+mod edit;
 mod folder;
 mod git;
 mod history;

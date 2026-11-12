@@ -1,6 +1,7 @@
-//! What the wiki may hold. The push check refuses a commit that breaks one of these rules, and
-//! the autosave service leaves a file that breaks one in the folder rather than commit it, since
-//! a commit the server refuses would hold back every save after it.
+//! What the wiki may hold. The push check refuses a commit that breaks one of these rules, the
+//! autosave service leaves a file that breaks one in the folder rather than commit it, since a
+//! commit the server refuses would hold back every save after it, and the editing API refuses a
+//! change that would break one.
 
 use crate::repo::is_page;
 
@@ -33,6 +34,37 @@ pub enum Broken {
     LargePage,
     #[error("a file over 10 MiB")]
     LargeFile,
+}
+
+/// Why a path that a client names cannot be a page's. Git gives the push check only paths it
+/// could store, but a client of the editing API can send any text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum BadPath {
+    #[error("it does not end in .md")]
+    NotAPage,
+    #[error("it starts with /")]
+    Absolute,
+    #[error("it has an empty, . or .. part")]
+    NotNormal,
+    #[error("it holds a NUL")]
+    Nul,
+}
+
+/// Why `path` cannot be a page's, if it cannot: it ends in `.md`, is relative, and has no empty,
+/// `.` or `..` part and no NUL. [`check`] then holds it to the rules for what it holds.
+#[must_use]
+pub fn page_path(path: &str) -> Option<BadPath> {
+    if path.contains('\0') {
+        Some(BadPath::Nul)
+    } else if !is_page(path.as_bytes()) {
+        Some(BadPath::NotAPage)
+    } else if path.starts_with('/') {
+        Some(BadPath::Absolute)
+    } else if path.split('/').any(|part| matches!(part, "" | "." | "..")) {
+        Some(BadPath::NotNormal)
+    } else {
+        None
+    }
 }
 
 /// The rule that `path`, holding `entry`, breaks, if any. A path component is `.git` in any
@@ -84,6 +116,26 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(path)
             );
+        }
+    }
+
+    #[test]
+    fn a_page_path_is_relative_normalised_and_ends_in_md() {
+        let cases = [
+            ("notes/a.md", None),
+            ("a.md", None),
+            ("with space/ö.md", None),
+            ("notes/a.txt", Some(BadPath::NotAPage)),
+            ("notes/a.MD", Some(BadPath::NotAPage)),
+            ("notes/", Some(BadPath::NotAPage)),
+            ("/notes/a.md", Some(BadPath::Absolute)),
+            ("notes//a.md", Some(BadPath::NotNormal)),
+            ("./a.md", Some(BadPath::NotNormal)),
+            ("notes/../a.md", Some(BadPath::NotNormal)),
+            ("a\0.md", Some(BadPath::Nul)),
+        ];
+        for (path, bad) in cases {
+            assert_eq!(page_path(path), bad, "{path:?}");
         }
     }
 }

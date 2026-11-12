@@ -22,11 +22,11 @@ use tokio::sync::oneshot;
 
 use crate::api::{self, ApiError};
 use crate::auth::{self, Machine, Tokens};
-use crate::git_http;
 use crate::git_version;
 use crate::index::{Index, Status};
 use crate::machines::Machines;
 use crate::repo::{NotOnMain, Repo};
+use crate::{edit, git_http};
 use crate::{log, now};
 
 /// The longest a change to the machines' state waits before it is written.
@@ -219,6 +219,7 @@ async fn serve_repo(path: PathBuf, args: &Args) -> Result<()> {
     let router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(reading)
+        .merge(edit::router(Arc::clone(&wiki), Arc::clone(&tokens)))
         .merge(git_http::router(wiki, tokens))
         .layer(middleware::from_fn(request_log));
     listen(args.addr.unwrap_or(REPO_ADDR), router, stopping).await?;

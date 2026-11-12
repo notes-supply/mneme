@@ -12,6 +12,7 @@ use serde_json::json;
 pub mod api;
 pub mod auth;
 pub mod autosave;
+pub mod edit;
 pub mod git_http;
 pub mod git_version;
 pub mod hook;
@@ -94,4 +95,9 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
             let _ = write!(out, "{byte:02x}");
             out
         })
+}
+
+/// Whether `text` is a full commit id as the API writes one: 40 lowercase hexadecimal digits.
+pub(crate) fn full_commit_id(text: &str) -> bool {
+    text.len() == 40 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }

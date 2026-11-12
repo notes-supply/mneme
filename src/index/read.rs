@@ -282,6 +282,41 @@ impl Index {
         })
     }
 
+    /// The live page at `path`, and the commit of its newest event.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a database error.
+    pub fn live(&self, path: &str) -> Result<Option<(PageId, String)>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT p.id, c.id FROM pages p JOIN versions v ON v.page = p.rowid \
+                 JOIN commits c ON c.seq = v.commit_seq \
+                 WHERE p.path = ?1 AND p.deleted IS NULL ORDER BY v.seq DESC LIMIT 1",
+                [path],
+                |row| Ok((PageId(row.get(0)?), row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// The page that `commit` left at `path`, if its event there was one.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a database error.
+    pub fn left_at(&self, commit: &str, path: &str) -> Result<Option<PageId>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT p.id FROM versions v JOIN commits c ON c.seq = v.commit_seq \
+                 JOIN pages p ON p.rowid = v.page WHERE c.id = ?1 AND v.path = ?2",
+                [commit, path],
+                |row| Ok(PageId(row.get(0)?)),
+            )
+            .optional()?)
+    }
+
     /// Events newest first, of one page or of all, at or after `since` and before `before`, and
     /// how many there are in all.
     ///

@@ -21,6 +21,8 @@ It needs Git 2.45 or newer on `PATH`, with `git http-backend`, and refuses to st
 
 By default `/v1`, the [reading API](api.md), has no login: whoever reaches it reads the whole wiki. Git over `/git/` needs a machine's token. So beyond the people who may read all of the wiki, expose only `/git/`. On a tailnet, `tailscale serve` in front of the server is enough to keep `/v1` to the tailnet.
 
+A client that is not a folder of files, such as a web editor or an agent, changes pages through the server's [editing routes](api.md#editing) with a token that may write, with or without `--private-api`. Each change is one commit on `main`, made on top of whatever has been pushed, keeps the push check's rules, and is refused when the page itself has changed since the client read it.
+
 With `--private-api`, every `/v1` route asks for `Authorization: Bearer <token>` with a token from the tokens file, read-only or not, and answers `401` with no body without one, as `/git/` does. `/healthz` stays open for probes. A server reachable from the internet should run with it.
 
 ## The image

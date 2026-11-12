@@ -12,8 +12,7 @@ use anyhow::{Context, Result, bail};
 
 use super::Settings;
 
-/// The id Git reads as no object at all.
-pub(super) const NO_OBJECT: &str = "0000000000000000000000000000000000000000";
+pub(super) use crate::repo::NO_OBJECT;
 
 /// One `git` command's result.
 pub(super) struct Run {

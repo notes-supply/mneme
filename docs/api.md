@@ -1,6 +1,6 @@
 # Reading API
 
-Every route is `GET`, lives under `/v1`, and answers with JSON. By default there is no authentication at this layer; the network keeps it private. The machines' reports, which `/v1/machines` lists, arrive on the Git routes with a machine's token, as described [at the end](#reports).
+Every reading route is `GET`, lives under `/v1`, and answers with JSON. By default there is no authentication at this layer; the network keeps it private. `mneme serve --repo` also has [editing routes](#editing), which commit a change to `main` and always ask for a token that may write. The machines' reports, which `/v1/machines` lists, arrive on the Git routes with a machine's token, as described [at the end](#reports).
 
 `mneme serve --repo` with `--private-api` asks every `/v1` route for `Authorization: Bearer <token>`, with any token from the tokens file, read-only or not. A request without one, or with one the server does not know, is `401` with `WWW-Authenticate: Bearer` and no body, as on the Git routes, whatever route it names. `/healthz` stays open.
 
@@ -15,7 +15,7 @@ Each route has one example response in `tests/fixtures/api/`. The tests check ev
 - **Page ids** are 16 hexadecimal characters. A page keeps its id across renames. A page created again at the path of a deleted one has a new id.
 - **Versions.** A version is a commit that changed a page's text. Events also include renames that keep the text and deletions. Those have `"version": false`.
 - **Paging.** `limit` defaults to 50 and is capped at 500. `offset` defaults to 0. A paged answer has `total`, the number of items across all pages.
-- **ETag.** Every response has a strong `ETag`, the hash of its body. A request with a matching `If-None-Match` gets `304` with no body.
+- **ETag.** Every response of a reading route has a strong `ETag`, the hash of its body. A request with a matching `If-None-Match` gets `304` with no body.
 - **Errors** are `{ "error": "..." }`: `400` for parameters that do not parse and for a search that cannot be read, `404` for an unknown route, page, commit or path, or a page with no text at a commit.
 
 ## `GET /v1/status`
@@ -43,7 +43,7 @@ Example: [`pages.json`](../tests/fixtures/api/pages.json).
 
 ## `GET /v1/pages/{id}`
 
-`{ "page": Page, "markdown", "windows" }`. `markdown` is the current text, or `null` for a deleted page. `windows` has four entries, for the last 7, 30 and 90 days and for all time (`"days": null`). Each one counts `versions`, `sessions` (runs of versions with gaps under 30 minutes), and words `added` and `removed` by those versions.
+`{ "page": Page, "commit", "markdown", "windows" }`. `commit` is the commit of the page's newest event, of any kind, which a change through the [editing routes](#editing) names as its `base`. `markdown` is the current text, or `null` for a deleted page. `windows` has four entries, for the last 7, 30 and 90 days and for all time (`"days": null`). Each one counts `versions`, `sessions` (runs of versions with gaps under 30 minutes), and words `added` and `removed` by those versions.
 
 Example: [`page.json`](../tests/fixtures/api/page.json).
 
@@ -124,6 +124,36 @@ Every machine in the tokens file, by name, as `{ "total", "machines": [Machine] 
 A `Machine` has `name`, `seen` (when it last made a Git request with its token that carried no report, so its last fetch or push), `reported` (when its last report arrived), the `state`, `detail`, `head`, `skipped` and `skipped_more` of that report, `current`, which is `true` when the reported head is the server's head, and `behind_since`, the server's time when the two heads first differed. Every field but `name` and `current` is `null` until the machine has done that, and `behind_since` is `null` again while the heads are the same.
 
 Example: [`machines.json`](../tests/fixtures/api/machines.json).
+
+## Editing
+
+`mneme serve --repo` also takes changes to pages, for clients that are not a folder of files, such as a web editor or an agent. Each route commits one change to `main`. It asks for `Authorization: Bearer <token>` with a token that may write, with or without `--private-api`: without a token the server knows it is `401` with no body, and with a read-only one `403` with `{ "error" }`. A body is JSON with `Content-Type: application/json` and at most 8 MiB, and has only the fields listed. One that is not JSON is `400`, one without that type `415`, one too long `413`, and one with a field missing, unknown or of the wrong type `422`, each with `{ "error" }`.
+
+A change names its `base`: the `commit` of the newest event of the page it started from, as `GET /v1/pages/{id}` gives it, or the first event of `/v1/pages/{id}/versions`. When the live page at the change's path has had another event since, because someone changed, moved or deleted it, the change is `409` with `{ "error", "current" }` and nothing changes. `current` is the commit of that page's newest event now, or `null` when no live page is at the path. Only the page's own history counts: other pages may have moved on, and the change is made on top of `main` as it is then.
+
+`author` is `{ "name", "email" }`. Each is one line, not blank, with no `<`, `>` or NUL. The commit's author is that, its committer is the token's machine as `<machine> <api@machine>`, and both are dated by the server's clock. `message` may be left out or `null`, and is then the default each route names. It is at most 64 KiB, with no NUL.
+
+A change keeps the wiki's rules, as a push must. A page's path ends in `.md`, is relative, and has no empty, `.` or `..` part, no NUL, no part named `.git` in any case and no name Git will not store, such as `git~1`. No file or folder may be in its way, and a page is at most 1 MiB. A change that breaks one is `422` with `{ "error" }`, and so is a bad `author` or `message`, or a `base` that is not a full commit id.
+
+The answer is read once the index has taken the commit, so a read that follows sees it, and `/v1/machines` compares every machine with the new head as after a push. Pushes go on meanwhile. When one lands while a change is made, the change is checked against the new `main` and made again on top of it. After four such rounds it is `503` with `{ "error" }` and `Retry-After: 1`.
+
+### `PUT /v1/paths/{path}`
+
+Writes the page at `path` with `{ "markdown", "base", "author", "message" }`. `base` must be there, and is `null` to create a page, so that a live page at the path is a conflict. The answer is `201` for a new page and `200` otherwise, with `{ "commit", "page": Page }`. `commit` is the base for the next change: the new commit, or the page's newest event when the text was already the page's, since no commit is made then. The default message is `Create <path>` or `Edit <path>`.
+
+Example: [`edit.json`](../tests/fixtures/api/edit.json).
+
+### `DELETE /v1/paths/{path}`
+
+Deletes the page at `path`, with `{ "base", "author", "message" }`, where `base` is a commit. The answer is `{ "commit" }`. The default message is `Delete <path>`.
+
+Example: [`deletion.json`](../tests/fixtures/api/deletion.json).
+
+### `POST /v1/moves`
+
+Moves the page at `from` to `to`, with `{ "from", "to", "base", "author", "message" }`. The page keeps its text and its id. `base` is about the page at `from`, and a live page at `to` is a conflict too, whose `current` is still that of the page at `from`. The answer is `{ "commit", "page": Page }`. The default message is `Move <from> to <to>`.
+
+Example: [`move.json`](../tests/fixtures/api/move.json). A conflict: [`conflict.json`](../tests/fixtures/api/conflict.json).
 
 ## Reports
 
