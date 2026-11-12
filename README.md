@@ -41,7 +41,7 @@ systemctl --user enable --now atrium
 `~/wiki` now syncs with every other machine, and http://localhost:8080 shows it. Without a systemd user manager, `mneme init --no-service` prints the service's command and `atrium --wiki-folder ~/wiki` runs in a terminal ([Install](docs/install.md#without-a-systemd-user-manager)). [Configuration](docs/configuration.md) has the other remotes.
 
 > [!WARNING]
-> A Mneme server's reading API, `/v1`, has no login: whoever reaches it reads the whole wiki. See [Deploy](docs/deploy.md#run-a-server) before you expose a server.
+> A Mneme server's reading API, `/v1`, has no login unless the server runs with `--private-api`: without it, whoever reaches it reads the whole wiki. A server reachable from the internet should run with `--private-api`. See [Deploy](docs/deploy.md#run-a-server) before you expose a server.
 
 ## Documentation
 

@@ -6,11 +6,21 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result, bail};
-use axum::http::HeaderValue;
+use axum::extract::{Request, State};
+use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
+use axum::http::{HeaderValue, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+
+/// The machine a request came from, for the request log.
+#[derive(Clone, Debug)]
+pub struct Machine(pub String);
 
 /// What a machine's token lets it do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +119,28 @@ impl Tokens {
         }
         found
     }
+}
+
+/// The answer to a request without a machine's token: no body, since it says nothing about why.
+#[must_use]
+pub fn unauthorized() -> Response {
+    (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, "Bearer")]).into_response()
+}
+
+/// Lets a request through only with a machine's token, read-only or not, and names that
+/// machine in the request log. It guards the reading API of a server run with `--private-api`.
+pub async fn any_token(
+    State(tokens): State<Arc<Tokens>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some((machine, _)) = tokens.machine(request.headers().get(AUTHORIZATION)) else {
+        return unauthorized();
+    };
+    let machine = Machine(machine.to_owned());
+    let mut response = next.run(request).await;
+    response.extensions_mut().insert(machine);
+    response
 }
 
 /// The hash and access of an entry that is an object: `sha256`, and `access` of `read` or

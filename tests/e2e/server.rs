@@ -37,6 +37,8 @@ pub struct Options {
     pub reader: bool,
     /// Take the tokens from an environment variable instead of a file.
     pub tokens_env: bool,
+    /// `--private-api`: every `/v1` route asks for a token.
+    pub private_api: bool,
 }
 
 pub struct Server {
@@ -174,6 +176,9 @@ impl Server {
             fs::write(&file, tokens).unwrap();
             command.arg("--tokens").arg(&file);
             dirs.push(dir);
+        }
+        if options.private_api {
+            command.arg("--private-api");
         }
         command.arg("--repo").arg(&repo);
         let mut server = Self::launch(&mut command, repo, dirs);

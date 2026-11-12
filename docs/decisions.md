@@ -27,6 +27,7 @@ Choices made while building Mneme that the design brief left open or that differ
 - **Each page carries its number of open questions.** It is a column the index writes with the questions, so `/v1/pages` and `/v1/pages/{id}` read it with no extra query.
 - **A path finds the page whose last event at that path is newest,** among pages that are not deleted. Two pages never hold one path at the same time, so that page is the one that had it most recently. A live page at the path is always that page. Deleted pages are left out before choosing, so a page that moved away is found even when a later page at the path was deleted.
 - **docs/api.md links its examples** in `tests/fixtures/api/` instead of copying them, so the documented responses are the tested ones.
+- **`--private-api` asks every `/v1` route for a machine's token,** read-only or not: the same tokens and the same `401` with no body as the Git routes, so a client needs no second kind of credential. It wraps the reading API's fallback too, so an unknown path is `401` and not a `404` that tells routes apart. `/healthz` stays open for probes. The request log then names the machine that read, as it does for Git. It is off by default, so a server on a private network goes on as before. `--folder` does not take it, since it listens on loopback only.
 
 ## Reading a folder
 

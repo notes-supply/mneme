@@ -1,5 +1,5 @@
-//! What a machine's token lets it do on the Git routes, and where the server reads the tokens
-//! from.
+//! What a machine's token lets it do on the Git routes and the reading API, and where the
+//! server reads the tokens from.
 
 use std::process::Command;
 
@@ -109,6 +109,7 @@ fn the_tokens_can_come_from_an_environment_variable() {
     let options = Options {
         reader: true,
         tokens_env: true,
+        ..Options::default()
     };
     let (server, head) = wiki(&options);
     assert_eq!(server.json("/v1/machines")["total"], 4);
@@ -149,4 +150,56 @@ fn serve_takes_exactly_one_of_tokens_and_tokens_env() {
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{said}");
     assert!(said.contains("MNEME_UNSET_TOKENS"), "{said}");
+}
+
+#[test]
+fn with_a_private_api_every_v1_route_asks_for_a_token_of_either_access() {
+    let options = Options {
+        reader: true,
+        private_api: true,
+        ..Options::default()
+    };
+    let (server, head) = wiki(&options);
+    let wrong = bearer("not-a-token");
+    let basic = "Basic bWlycm9yOnRlc3QtdG9rZW4tb2YtbWlycm9y".to_owned();
+    for path in [
+        "/v1/status",
+        "/v1/pages",
+        "/v1/search?q=home",
+        "/v1/machines",
+        "/v1/nothing",
+        "/elsewhere",
+    ] {
+        for authorization in [None, Some(&wrong), Some(&basic)] {
+            let headers: Vec<(&str, &str)> = authorization
+                .iter()
+                .map(|value| ("authorization", value.as_str()))
+                .collect();
+            let reply = server.get_with(path, &headers);
+            assert_eq!(reply.status, 401, "{path} {authorization:?}");
+            assert_eq!(reply.header("www-authenticate"), Some("Bearer"), "{path}");
+            assert_eq!(reply.body, "", "{path} {authorization:?}");
+        }
+    }
+    for token in [TOKEN, READER.1] {
+        let authorization = bearer(token);
+        let reply = server.get_with("/v1/status", &[("authorization", &authorization)]);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        assert_eq!(reply.json()["head"], head.as_str());
+        let missing = server.get_with("/v1/nothing", &[("authorization", &authorization)]);
+        assert_eq!(missing.status, 404);
+    }
+    assert_eq!(
+        server.get("/healthz").body,
+        "ok",
+        "the probe needs no token"
+    );
+    let read: Vec<Value> = server
+        .log_with(r#""machine":"mirror""#)
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|line| line["path"] == "/v1/status" && line["status"] == 200)
+        .collect();
+    let machines: Vec<&Value> = read.iter().map(|line| &line["machine"]).collect();
+    assert_eq!(machines, ["laptop", READER.0], "the log names who read");
 }

@@ -21,8 +21,8 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::oneshot;
 
 use crate::api::{self, ApiError};
-use crate::auth::Tokens;
-use crate::git_http::{self, Machine};
+use crate::auth::{self, Machine, Tokens};
+use crate::git_http;
 use crate::git_version;
 use crate::index::{Index, Status};
 use crate::machines::Machines;
@@ -55,9 +55,13 @@ pub struct Args {
     /// container platform gives a secret.
     #[arg(long, value_name = "NAME", requires = "repo")]
     pub tokens_env: Option<String>,
+    /// Ask every /v1 route for a machine's token, read-only or not. Without it the reading API
+    /// has no login, and the network must keep it private.
+    #[arg(long, requires = "repo")]
+    pub private_api: bool,
     /// A clone of the wiki on this machine, whose `main` is read and followed. Only the reading
     /// API is served, on loopback, and nothing is written to the folder.
-    #[arg(long, conflicts_with_all = ["repo", "tokens", "tokens_env"])]
+    #[arg(long, conflicts_with_all = ["repo", "tokens", "tokens_env", "private_api"])]
     pub folder: Option<PathBuf>,
     /// The address to listen on. The default is 127.0.0.1:8080 with --repo, and 127.0.0.1:8081
     /// with --folder, which listens on a loopback address only.
@@ -207,9 +211,14 @@ async fn serve_repo(path: PathBuf, args: &Args) -> Result<()> {
     let wiki = Arc::new(wiki);
     let (stop, stopped) = oneshot::channel();
     let saving = tokio::spawn(save_machines(Arc::clone(&wiki), stopped));
+    let mut reading = api::router(Arc::clone(&wiki));
+    if args.private_api {
+        let tokens = Arc::clone(&tokens);
+        reading = reading.layer(middleware::from_fn_with_state(tokens, auth::any_token));
+    }
     let router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .merge(api::router(Arc::clone(&wiki)))
+        .merge(reading)
         .merge(git_http::router(wiki, tokens))
         .layer(middleware::from_fn(request_log));
     listen(args.addr.unwrap_or(REPO_ADDR), router, stopping).await?;

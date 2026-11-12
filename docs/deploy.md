@@ -19,7 +19,9 @@ A read-only token may clone, fetch and report its machine's state, and a push wi
 
 It needs Git 2.45 or newer on `PATH`, with `git http-backend`, and refuses to start with an older one. It listens on `127.0.0.1:8080` unless `--addr` says otherwise, logs JSON lines on standard error, and stops on SIGTERM.
 
-`/v1`, the [reading API](api.md), has no login: whoever reaches it reads the whole wiki. Git over `/git/` needs a machine's token. So beyond the people who may read all of the wiki, expose only `/git/`. On a tailnet, `tailscale serve` in front of the server is enough to keep `/v1` to the tailnet.
+By default `/v1`, the [reading API](api.md), has no login: whoever reaches it reads the whole wiki. Git over `/git/` needs a machine's token. So beyond the people who may read all of the wiki, expose only `/git/`. On a tailnet, `tailscale serve` in front of the server is enough to keep `/v1` to the tailnet.
+
+With `--private-api`, every `/v1` route asks for `Authorization: Bearer <token>` with a token from the tokens file, read-only or not, and answers `401` with no body without one, as `/git/` does. `/healthz` stays open for probes. A server reachable from the internet should run with it.
 
 ## The image
 

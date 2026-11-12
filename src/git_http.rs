@@ -9,9 +9,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
-use axum::http::header::{
-    AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, WWW_AUTHENTICATE,
-};
+use axum::http::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -22,7 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 
-use crate::auth::{Access, Tokens};
+use crate::auth::{Access, Machine, Tokens, unauthorized};
 use crate::machines::{MAX_REPORT, REPORT_HEADER, Report, Unreadable};
 use crate::serve::Wiki;
 use crate::{hook, log, now};
@@ -33,10 +31,6 @@ const MAX_BODY: u64 = 64 << 20;
 const MAX_HEADERS: usize = 64 << 10;
 /// How much of the child's standard error is logged. The rest is read and dropped.
 const MAX_STDERR: u64 = 16 << 10;
-
-/// The machine a request came from, for the request log.
-#[derive(Clone, Debug)]
-pub struct Machine(pub String);
 
 /// The services of smart HTTP that `info/refs?service=` names.
 const UPLOAD: &str = "git-upload-pack";
@@ -94,11 +88,6 @@ fn run(command: &mut StdCommand) -> Result<()> {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(())
-}
-
-/// The answer to a request without a machine's token: no body, since it says nothing about why.
-fn unauthorized() -> Response {
-    (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, "Bearer")]).into_response()
 }
 
 /// The service a request runs, from its path and, for `info/refs`, the last `service` in its

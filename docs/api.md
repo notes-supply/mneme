@@ -1,6 +1,8 @@
 # Reading API
 
-Every route is `GET`, lives under `/v1`, and answers with JSON. There is no authentication at this layer; the network keeps it private. The machines' reports, which `/v1/machines` lists, arrive on the Git routes with a machine's token, as described [at the end](#reports).
+Every route is `GET`, lives under `/v1`, and answers with JSON. By default there is no authentication at this layer; the network keeps it private. The machines' reports, which `/v1/machines` lists, arrive on the Git routes with a machine's token, as described [at the end](#reports).
+
+`mneme serve --repo` with `--private-api` asks every `/v1` route for `Authorization: Bearer <token>`, with any token from the tokens file, read-only or not. A request without one, or with one the server does not know, is `401` with `WWW-Authenticate: Bearer` and no body, as on the Git routes, whatever route it names. `/healthz` stays open.
 
 `mneme serve --folder DIR` serves the same routes for a clone on the same machine, from `main` in `DIR/.git`, which it follows. It listens on a loopback address only, `127.0.0.1:8081` unless `--addr` says otherwise, and answers `421` with `{ "error" }` to any request whose `Host` is not `localhost`, `127.0.0.1` or `[::1]`, with any port. There `/v1/machines` is always empty, and there are no Git routes.
 
