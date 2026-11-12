@@ -16,14 +16,14 @@ use tempfile::TempDir;
 
 use crate::git::{Isolation, Work};
 
-/// The token of the machine `blackbox`.
-pub const TOKEN: &str = "test-token-of-blackbox";
-pub const AUTHORIZATION: &str = "Authorization: Bearer test-token-of-blackbox";
+/// The token of the machine `laptop`.
+pub const TOKEN: &str = "test-token-of-laptop";
+pub const AUTHORIZATION: &str = "Authorization: Bearer test-token-of-laptop";
 /// Every machine the test servers know, with its token.
 pub const MACHINES: [(&str, &str); 3] = [
-    ("aeolus", "test-token-of-aeolus"),
-    ("blackbox", TOKEN),
-    ("cassia", "test-token-of-cassia"),
+    ("desktop", "test-token-of-desktop"),
+    ("laptop", TOKEN),
+    ("tablet", "test-token-of-tablet"),
 ];
 
 pub struct Server {

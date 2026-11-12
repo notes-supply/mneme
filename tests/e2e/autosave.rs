@@ -774,7 +774,7 @@ fn a_push_the_server_refuses_blocks_until_the_head_changes() {
     assert_eq!(wiki.pushes(), pushes + 1, "a new head is pushed once");
 }
 
-/// `mneme autosave init` with the token of `blackbox`.
+/// `mneme autosave init` with the token of `laptop`.
 fn init(git: &Isolation, server: &Server, folder: &Path) -> Output {
     let tokens = TempDir::new().unwrap();
     let token_file = tokens.path().join("token");
