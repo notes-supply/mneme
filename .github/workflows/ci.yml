@@ -55,7 +55,7 @@ jobs:
           if-no-files-found: error
 
   # A push to main deploys once the gate passed on that commit: release.yml publishes the image
-  # and the signed manifests that Flux on Apollo follows.
+  # and the signed manifests that the cluster's Flux follows.
   release:
     name: release
     needs: [gate, image]
