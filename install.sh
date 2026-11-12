@@ -158,12 +158,14 @@ has() {
 }
 
 main() {
-  apps=${*:-mneme atrium}
-  for app in $apps; do
+  if [ $# -eq 0 ]; then set -- mneme atrium; fi
+  apps=
+  for app in "$@"; do
     case $app in
       mneme | atrium) ;;
       *) fail "there is no app called $app. Name mneme, atrium or both, or none for both" ;;
     esac
+    has "$app" || apps="$apps $app"
   done
   default_dir=${HOME:?HOME is not set}/.local/bin
   dir=${MNEME_INSTALL_DIR:-$default_dir}
@@ -179,7 +181,9 @@ main() {
   for app in $apps; do download "$app"; done
   mkdir -p "$dir" || fail "could not create $dir. Set MNEME_INSTALL_DIR to a folder you can write"
   installed=
+  replaced=no
   for app in $apps; do
+    if [ -e "$dir/$app" ]; then replaced=yes; fi
     place "$app"
     installed="$installed, $app $(cat "$work/$app/tag")"
   done
@@ -188,6 +192,9 @@ main() {
     say "Each binary matched its release's SHA256SUMS and its signature."
   else
     say "Each binary matched its release's SHA256SUMS. cosign is not on PATH, so only the checksums were checked; to check the signatures too, see $docs#verify-a-download"
+  fi
+  if [ "$replaced" = yes ]; then
+    say "A service that was running the old version goes on with it until it restarts: systemctl --user try-restart mneme-autosave atrium"
   fi
   unit=no
   if has atrium; then install_unit; fi

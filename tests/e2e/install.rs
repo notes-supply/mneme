@@ -274,6 +274,10 @@ fn a_good_release_installs_both_apps_and_atriums_unit_without_enabling_it() {
         "the unit is loaded and not enabled"
     );
     let said = stdout(&output);
+    assert!(
+        !said.contains("try-restart"),
+        "nothing was replaced: {said}"
+    );
     for line in [
         format!(
             "Installed mneme {TAG}, atrium {TAG} in {}.",
@@ -291,10 +295,18 @@ fn a_good_release_installs_both_apps_and_atriums_unit_without_enabling_it() {
     }
 
     fs::write(machine.unit(), "# My own\n").unwrap();
-    let again = machine.install(&[], &[]);
+    let again = machine.install(&["atrium", "mneme", "atrium"], &[]);
     assert!(again.status.success(), "{again:?}");
     assert_eq!(fs::read_to_string(machine.unit()).unwrap(), "# My own\n");
-    assert!(stdout(&again).contains("is already there, and was left as it is"));
+    let said = stdout(&again);
+    for line in [
+        format!("Installed atrium {TAG}, mneme {TAG} in"),
+        "is already there, and was left as it is".to_owned(),
+        "goes on with it until it restarts: systemctl --user try-restart mneme-autosave atrium"
+            .to_owned(),
+    ] {
+        assert!(said.contains(&line), "{line}: {said}");
+    }
     assert!(!machine.systemctl().contains("enable"));
 }
 
