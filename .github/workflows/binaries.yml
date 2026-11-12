@@ -1,0 +1,138 @@
+name: Binaries
+# On a version tag of a commit on main, builds a static mneme for x86_64 and aarch64 from the
+# Containerfile's build stage, so each binary is the one the image would hold, and attaches them
+# to a GitHub release with their checksums. Each is signed keyless as this file at that tag,
+# which is what `cosign verify-blob` in the README checks.
+on:
+  push:
+    tags: ["v*"]
+permissions: {}
+concurrency:
+  group: binaries-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  on-main:
+    name: on main
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # compare the tag's commit with main
+    steps:
+      - name: Check that the tag's commit is on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$GITHUB_SHA" --jq .status)
+          case "$status" in
+            identical | behind) echo "$GITHUB_REF_NAME is $GITHUB_SHA, which is on main" ;;
+            *)
+              echo "$GITHUB_REF_NAME is $GITHUB_SHA, which is not on main ($status)" >&2
+              exit 1
+              ;;
+          esac
+
+  build:
+    name: build ${{ matrix.arch }}
+    needs: [on-main]
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read # check out the tag
+    env:
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install podman and readelf where the runner lacks them
+        run: |
+          if ! command -v podman >/dev/null || ! command -v readelf >/dev/null; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q podman binutils
+          fi
+      - name: Build mneme in the Containerfile's build stage
+        run: |
+          podman build --target build -t "localhost/mneme-build:$ARCH" -f Containerfile .
+          container=$(podman create "localhost/mneme-build:$ARCH")
+          podman cp "$container:/mneme" "mneme-$ARCH-linux"
+          podman rm "$container" >/dev/null
+      - name: Check that it is static, for this machine, and of this version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          binary="mneme-$ARCH-linux"
+          if readelf -lW "$binary" | grep -q 'program interpreter'; then
+            echo "$binary names a program interpreter, so it is not fully static" >&2
+            exit 1
+          fi
+          machine=$(readelf -hW "$binary" | sed -n 's/^ *Machine: *//p')
+          case "$ARCH:$machine" in
+            "x86_64:Advanced Micro Devices X86-64" | "aarch64:AArch64") ;;
+            *)
+              echo "$binary is built for $machine" >&2
+              exit 1
+              ;;
+          esac
+          said=$("./$binary" --version)
+          echo "$binary is static and says: $said"
+          if [ "$said" != "mneme ${TAG#v}" ]; then
+            echo "$TAG builds a binary that says $said" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mneme-${{ matrix.arch }}-linux
+          path: mneme-${{ matrix.arch }}-linux
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the release and attach the files
+      id-token: write # sign keyless as this workflow at this tag
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          install_args: aqua:sigstore/cosign
+          cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: mneme-*-linux
+          merge-multiple: true
+          path: dist
+      - name: Sign each binary and sum them
+        working-directory: dist
+        run: |
+          for binary in mneme-x86_64-linux mneme-aarch64-linux; do
+            cosign sign-blob --yes --bundle "$binary.sigstore.json" "$binary"
+          done
+          sha256sum mneme-x86_64-linux mneme-aarch64-linux > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create the release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --verify-tag --title "Mneme $TAG" \
+            --notes "Static Linux binaries of Mneme $TAG. The README says how to verify and install them." \
+            mneme-x86_64-linux mneme-x86_64-linux.sigstore.json \
+            mneme-aarch64-linux mneme-aarch64-linux.sigstore.json \
+            SHA256SUMS
