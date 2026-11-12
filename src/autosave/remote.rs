@@ -118,7 +118,7 @@ impl Remote {
                  --token-file instead, so that it stays out of the URL and the logs"
             );
         }
-        let url = if transport == Transport::Local && !url.starts_with("file:") {
+        let url = if transport == Transport::Local && file_url(url).is_none() {
             let absolute = std::path::absolute(Path::new(url))
                 .with_context(|| format!("finding the remote {url}"))?;
             absolute
@@ -138,6 +138,34 @@ impl Remote {
             Self::Server { url, .. } => format!("{url}/git/wiki.git"),
             Self::Git { url, .. } => url.clone(),
         }
+    }
+
+    /// Where the repository is on this machine, for a remote that is a path or a `file://`
+    /// URL. A URL is read as Git reads it: its `%XX` escapes are decoded, and its host may be
+    /// `localhost` or left out.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a `file://` URL that names another host, since its path is not on this
+    /// machine.
+    pub fn local_path(&self) -> Result<Option<PathBuf>> {
+        let Self::Git { url, .. } = self else {
+            return Ok(None);
+        };
+        if Transport::of(url) != Transport::Local {
+            return Ok(None);
+        }
+        let Some(rest) = file_url(url) else {
+            return Ok(Some(PathBuf::from(url)));
+        };
+        let path = match rest.find('/') {
+            Some(0) => rest,
+            Some(at) if rest[..at].eq_ignore_ascii_case("localhost") => &rest[at..],
+            _ => bail!(
+                "{url} names a host other than localhost, so it is not a path on this machine"
+            ),
+        };
+        Ok(Some(PathBuf::from(percent_decode(path))))
     }
 
     /// Whether the remote is a Mneme server, which takes reports and checks every push.
@@ -200,6 +228,13 @@ fn shell_quote(text: &str) -> String {
 fn basic(url: &str, token: &str) -> String {
     let user = userinfo(url).map_or_else(|| "git".to_owned(), percent_decode);
     STANDARD.encode(format!("{user}:{token}"))
+}
+
+/// What follows `file://` in a `file:` URL, in any case.
+fn file_url(url: &str) -> Option<&str> {
+    url.get(..7)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("file://"))
+        .map(|_| &url[7..])
 }
 
 /// What comes before the `@` of a URL's authority, such as `alice` in
@@ -412,6 +447,32 @@ mod tests {
             let remote = Remote::git(given, Login::default()).unwrap();
             assert_eq!(remote.origin(), given);
         }
+    }
+
+    #[test]
+    fn a_local_remote_has_its_path_on_this_machine() {
+        let path = |url: &str| Remote::git(url, Login::default()).unwrap().local_path();
+        assert_eq!(path("/srv/wiki.git").unwrap(), Some("/srv/wiki.git".into()));
+        assert_eq!(
+            path("file:///srv/a%20b.git").unwrap(),
+            Some("/srv/a b.git".into())
+        );
+        assert_eq!(
+            path("file://localhost/srv/wiki.git").unwrap(),
+            Some("/srv/wiki.git".into())
+        );
+        assert_eq!(
+            path("FILE://LocalHost/srv/wiki.git").unwrap(),
+            Some("/srv/wiki.git".into())
+        );
+        assert!(path("file://example.com/srv/wiki.git").is_err());
+        assert_eq!(path("ssh://host/~/wiki.git").unwrap(), None);
+        assert_eq!(path("https://example.com/wiki.git").unwrap(), None);
+        let server = Remote::Server {
+            url: "https://mneme.example".to_owned(),
+            token: Token("t".to_owned()),
+        };
+        assert_eq!(server.local_path().unwrap(), None);
     }
 
     #[test]

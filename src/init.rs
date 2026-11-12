@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::autosave::{self, Remote, RemoteArgs, Settings, Transport};
+use crate::autosave::{self, Remote, RemoteArgs, Settings};
 
 /// The unit's name, and its file's.
 const UNIT: &str = "mneme-autosave.service";
@@ -183,11 +183,7 @@ fn utf8(text: OsString) -> Result<String> {
 /// this machine, and nothing else.
 fn unit(command: &[String], folder: &Path, remote: &Remote) -> Result<String> {
     let mut writable = vec![folder.to_owned()];
-    if let Remote::Git { url, .. } = remote
-        && Transport::of(url) == Transport::Local
-    {
-        writable.push(PathBuf::from(url.strip_prefix("file://").unwrap_or(url)));
-    }
+    writable.extend(remote.local_path()?);
     let writable = writable
         .iter()
         .map(|path| path_word(path))

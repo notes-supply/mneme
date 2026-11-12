@@ -155,15 +155,31 @@ impl Git {
         command
     }
 
-    /// Clones the remote's repository into the folder, which must be missing or empty.
-    pub fn clone_server(&self) -> Result<Run> {
+    /// Clones the remote's repository into the folder, which must be missing or empty, with
+    /// `main` checked out when the remote has one, whatever its default branch is.
+    pub fn clone_server(&self, has_main: bool) -> Result<Run> {
         let mut command = self.command(&[]);
         command
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
-            .args(["clone", "--quiet", &self.url])
-            .arg(&self.folder);
+            .args(["clone", "--quiet"]);
+        if has_main {
+            command.args(["--branch", "main"]);
+        }
+        command.arg(&self.url).arg(&self.folder);
         finish(command, &["clone"], &[])
+    }
+
+    /// Asks the remote for its branches. It needs no repository, so it works when the folder
+    /// is not one.
+    pub fn ask_branches(&self) -> Result<Run> {
+        let mut command = self.command(&[]);
+        command
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .current_dir("/")
+            .args(["ls-remote", "--heads", &self.url]);
+        finish(command, &["ls-remote"], &[])
     }
 
     /// Makes the folder a repository on `main`, without touching a file in it.

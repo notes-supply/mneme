@@ -387,3 +387,110 @@ fn init_with_a_server_or_a_key_writes_their_absolute_paths() {
         "{output:?}"
     );
 }
+
+#[test]
+fn init_checks_out_main_whatever_the_remotes_default_branch_and_refuses_a_remote_without_it() {
+    let machine = Machine::new();
+    let git = &machine.git;
+    let bare = bare_wiki(git, machine.root());
+    let bare_arg = bare.to_str().unwrap();
+    let work = machine.root().join("work");
+    git.ok(
+        machine.root(),
+        &["clone", "-q", bare_arg, work.to_str().unwrap()],
+    );
+    git.ok(&work, &["checkout", "-q", "-b", "master"]);
+    fs::write(work.join("old.md"), "# Old\n").unwrap();
+    git.ok(&work, &["add", "-A"]);
+    git.ok(&work, &["commit", "-q", "-m", "An old branch"]);
+    git.ok(&work, &["push", "-q", "origin", "master"]);
+    git.ok(&bare, &["symbolic-ref", "HEAD", "refs/heads/master"]);
+
+    let folder = machine.root().join("wiki");
+    let output = machine.init(&[
+        "--folder",
+        folder.to_str().unwrap(),
+        "--remote",
+        bare_arg,
+        "--name",
+        "laptop",
+        "--no-service",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        git.ok(&folder, &["symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/main"
+    );
+    assert!(folder.join("notes.md").exists());
+    assert!(
+        !folder.join("old.md").exists(),
+        "main is checked out, not master"
+    );
+
+    git.ok(&bare, &["update-ref", "-d", "refs/heads/main"]);
+    let elsewhere = machine.root().join("elsewhere");
+    let refused = machine.init(&[
+        "--folder",
+        elsewhere.to_str().unwrap(),
+        "--remote",
+        bare_arg,
+        "--name",
+        "desktop",
+        "--no-service",
+    ]);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        stderr(&refused).contains("has no main branch, only master"),
+        "{refused:?}"
+    );
+    assert!(!elsewhere.exists(), "nothing is cloned");
+}
+
+#[test]
+fn init_writes_the_path_of_a_file_url_into_the_units_writable_paths() {
+    let machine = Machine::new();
+    let git = &machine.git;
+    let bare = bare_wiki(git, machine.root());
+    let spaced = machine.root().join("the wiki.git");
+    fs::rename(&bare, &spaced).unwrap();
+    let url = format!(
+        "file://localhost{}",
+        spaced.to_str().unwrap().replace(' ', "%20")
+    );
+    let folder = machine.root().join("wiki");
+    let output = machine.init(&[
+        "--folder",
+        folder.to_str().unwrap(),
+        "--remote",
+        &url,
+        "--name",
+        "laptop",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(folder.join("notes.md").exists());
+    let unit = machine.unit();
+    assert!(
+        unit.contains(&format!(
+            "ReadWritePaths={} \"{}\"\n",
+            folder.display(),
+            spaced.display()
+        )),
+        "{unit}"
+    );
+
+    let elsewhere = machine.root().join("elsewhere");
+    let refused = machine.init(&[
+        "--folder",
+        elsewhere.to_str().unwrap(),
+        "--remote",
+        &format!("file://example.com{}", spaced.display()),
+        "--name",
+        "laptop",
+        "--force",
+    ]);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        stderr(&refused).contains("names a host other than localhost"),
+        "{refused:?}"
+    );
+}

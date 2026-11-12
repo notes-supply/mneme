@@ -292,8 +292,25 @@ fn ready(git: &Git, adopt: bool) -> Result<()> {
         Err(error) => return Err(error).context(format!("reading {}", path.display())),
     };
     if empty {
+        let asked = git.ask_branches()?;
+        if !asked.success {
+            bail!("asking {url} for its branches failed: {}", asked.error());
+        }
+        let branches: Vec<String> = String::from_utf8_lossy(&asked.stdout)
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .map(|(_, name)| name.trim_start_matches("refs/heads/").to_owned())
+            .collect();
+        let has_main = branches.iter().any(|branch| branch == "main");
+        if !has_main && !branches.is_empty() {
+            bail!(
+                "{url} has no main branch, only {}. The service syncs main alone, so name the \
+                 wiki's branch main on the remote first",
+                branches.join(", ")
+            );
+        }
         fs::create_dir_all(path)?;
-        let run = git.clone_server()?;
+        let run = git.clone_server(has_main)?;
         if !run.success {
             bail!("cloning {url} failed: {}", run.error());
         }
