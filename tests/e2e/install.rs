@@ -411,6 +411,34 @@ fn atrium_alone_without_a_user_manager_gets_its_unit_and_is_told_to_install_mnem
 }
 
 #[test]
+fn a_folder_with_a_space_or_a_quote_is_quoted_in_every_command_printed() {
+    let machine = Machine::new("x86_64");
+    let dir = machine.root.path().join("my tools/it's here");
+    let output = machine.install(&["atrium"], &[("MNEME_INSTALL_DIR", &dir)]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(dir.join("atrium").exists());
+    let quoted = format!("'{}'", dir.display().to_string().replace('\'', r"'\''"));
+    let said = stdout(&output);
+    for line in [
+        format!("MNEME_INSTALL_DIR={quoted} sh -s -- mneme\n"),
+        format!("export PATH={quoted}:\"$PATH\""),
+    ] {
+        assert!(said.contains(&line), "{line}: {said}");
+    }
+    let shell = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "MNEME_INSTALL_DIR={quoted} sh -c 'printf %s \"$MNEME_INSTALL_DIR\"'"
+        ))
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&shell.stdout),
+        dir.to_str().unwrap()
+    );
+}
+
+#[test]
 fn a_binary_that_does_not_match_its_checksum_installs_nothing() {
     let machine = Machine::new("x86_64");
     fs::write(

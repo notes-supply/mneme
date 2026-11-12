@@ -24,6 +24,24 @@ docs=https://github.com/notes-supply/mneme/blob/main/docs
 script=https://raw.githubusercontent.com/notes-supply/mneme/main/install.sh
 
 say() { printf '%s\n' "$*"; }
+# $1 as one word for a POSIX shell, so a printed command works with any folder.
+quote() {
+  rest=$1
+  quoted=
+  while :; do
+    case $rest in
+      *\'*)
+        quoted="$quoted${rest%%\'*}'\\''"
+        rest=${rest#*\'}
+        ;;
+      *)
+        quoted="$quoted$rest"
+        break
+        ;;
+    esac
+  done
+  printf "'%s'" "$quoted"
+}
 fail() {
   printf 'install.sh: %s\n' "$*" >&2
   exit 1
@@ -214,7 +232,7 @@ main() {
   if has atrium && [ "$systemd" = yes ]; then install_unit; fi
   case ":$PATH:" in
     *":$dir:"*) ;;
-    *) say "$dir is not on PATH. Add it, for example in ~/.profile: export PATH=\"$dir:\$PATH\"" ;;
+    *) say "$dir is not on PATH. Run this here, and add it to ~/.profile for new shells: export PATH=$(quote "$dir"):\"\$PATH\"" ;;
   esac
   if has mneme; then check_git; fi
 
@@ -229,7 +247,7 @@ main() {
       if [ "$dir" = "$default_dir" ]; then
         say "  curl -fsSL $script | sh -s -- mneme"
       else
-        say "  curl -fsSL $script | MNEME_INSTALL_DIR=$dir sh -s -- mneme"
+        say "  curl -fsSL $script | MNEME_INSTALL_DIR=$(quote "$dir") sh -s -- mneme"
       fi
       say "    installs Mneme first, which Atrium runs to read the wiki"
     else

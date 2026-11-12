@@ -441,8 +441,10 @@ fn init_writes_the_path_of_a_file_url_into_the_units_writable_paths() {
     let bare = bare_wiki(git, machine.root());
     let spaced = machine.root().join("the wiki.git");
     fs::rename(&bare, &spaced).unwrap();
+    // The scheme in capitals too: Git reads `FILE://` as a remote helper's name unless it is
+    // lowercased first.
     let url = format!(
-        "file://localhost{}",
+        "FILE://localhost{}",
         spaced.to_str().unwrap().replace(' ', "%20")
     );
     let folder = machine.root().join("wiki");
@@ -456,6 +458,11 @@ fn init_writes_the_path_of_a_file_url_into_the_units_writable_paths() {
     ]);
     assert!(output.status.success(), "{output:?}");
     assert!(folder.join("notes.md").exists());
+    assert!(
+        git.ok(&folder, &["remote", "get-url", "origin"])
+            .starts_with("file://localhost"),
+        "origin has the scheme in lower case"
+    );
     let unit = machine.unit();
     assert!(
         unit.contains(&format!(
