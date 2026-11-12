@@ -22,7 +22,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
-          install_args: rust aqua:nextest-rs/nextest/cargo-nextest aqua:EmbarkStudios/cargo-deny aqua:rhysd/actionlint aqua:zizmorcore/zizmor
+          install_args: rust aqua:nextest-rs/nextest/cargo-nextest aqua:EmbarkStudios/cargo-deny aqua:rhysd/actionlint aqua:zizmorcore/zizmor aqua:koalaman/shellcheck
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}

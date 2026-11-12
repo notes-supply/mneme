@@ -36,13 +36,9 @@ pub struct RemoteArgs {
     /// URL's user name, or `git` when it has none.
     #[arg(long, required_unless_present = "remote")]
     pub token_file: Option<PathBuf>,
-    /// An SSH key that ssh uses alone for the remote, such as a deploy key of this machine's
-    /// own. Without it, ssh logs in as it does in a terminal.
-    #[arg(long, conflicts_with = "server")]
-    pub ssh_key: Option<PathBuf>,
 }
 
-/// A Mneme server or any Git remote, and never both.
+/// A Mneme server or a Git remote, and never both.
 #[derive(Debug, clap::Args)]
 #[group(required = true, multiple = false)]
 pub struct To {
@@ -50,8 +46,8 @@ pub struct To {
     /// lists each machine's state.
     #[arg(long)]
     pub server: Option<String>,
-    /// Any Git remote, as `origin` will name it: `ssh://host/~/wiki.git`,
-    /// `git@host:wiki.git`, `https://host/wiki.git`, or a path.
+    /// A Git remote, as `origin` will name it: a Git host's `https://host/wiki.git`, or a
+    /// path or `file://` URL on this machine. SSH, `git://` and remote helpers are refused.
     #[arg(long)]
     pub remote: Option<String>,
 }
@@ -110,10 +106,9 @@ pub fn main(command: Command) -> Result<()> {
 }
 
 impl Target {
-    /// The settings of `run`, or of `init` when `run` is `None`. Only `init` lets ssh learn a
-    /// new host key.
+    /// The settings of `run`, or of `init` when `run` is `None`.
     fn config(&self, run: Option<&Run>) -> Result<Settings> {
-        let remote = self.remote.remote(run.is_none())?;
+        let remote = self.remote.remote()?;
         let timing = |pick: fn(&Run) -> Duration, default: u64| {
             run.map_or(Duration::from_secs(default), pick)
         };
@@ -131,30 +126,20 @@ impl Target {
 }
 
 impl RemoteArgs {
-    /// The remote, with what it logs in with. `learn_host_key` lets ssh accept the key of a
-    /// host it has never seen, which only a first clone needs.
+    /// The remote, with what it logs in with.
     ///
     /// # Errors
     ///
-    /// Fails when the token file or the key cannot be read, or they do not fit the remote.
-    pub fn remote(&self, learn_host_key: bool) -> Result<Remote> {
+    /// Fails when the token file cannot be read, the remote is not one Mneme syncs with, or
+    /// the token does not fit it.
+    pub fn remote(&self) -> Result<Remote> {
         let token = self.token_file.as_deref().map(read_token).transpose()?;
         match (&self.to.server, &self.to.remote) {
             (Some(server), _) => Ok(Remote::Server {
                 url: server.trim_end_matches('/').to_owned(),
                 token: token.context("a server needs --token-file")?,
             }),
-            (None, Some(url)) => {
-                let ssh_key = self.ssh_key.as_deref().map(key_file).transpose()?;
-                Remote::git(
-                    url,
-                    Login {
-                        ssh_key,
-                        accept_new_host_key: learn_host_key,
-                        token,
-                    },
-                )
-            }
+            (None, Some(url)) => Remote::git(url, Login { token }),
             (None, None) => bail!("name a --server or a --remote"),
         }
     }
@@ -178,13 +163,6 @@ fn read_token(file: &Path) -> Result<Token> {
         bail!("the token file {} is empty", file.display());
     }
     Ok(Token(token.to_owned()))
-}
-
-/// The key at `file`, as an absolute path, once it is known to be readable. ssh runs in the
-/// folder, so a relative path would not find it.
-fn key_file(file: &Path) -> Result<PathBuf> {
-    File::open(file).with_context(|| format!("reading the key file {}", file.display()))?;
-    std::path::absolute(file).with_context(|| format!("finding {}", file.display()))
 }
 
 /// Takes the folder for this service alone, until the returned file is closed when the service
@@ -261,29 +239,48 @@ fn serve(run: &Run) -> Result<()> {
     })
 }
 
+/// What making a folder ready did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ready {
+    /// The folder was missing or empty, and is a clone now.
+    Cloned,
+    /// The folder was a clone of the remote already.
+    Checked,
+    /// A folder of files became a repository, and the service's first save pushes them.
+    Adopted,
+}
+
+/// `mneme autosave init`, which logs what it did as a JSON line, as the service does.
 fn init(target: &Target) -> Result<()> {
     let config = target.config(None)?;
     git_version::check(&config.git, "mneme autosave")?;
-    ready(&Git::new(&config), false)
+    let fields = match ready(&Git::new(&config), false)? {
+        Ready::Cloned => json!({ "folder": config.folder, "cloned": true }),
+        Ready::Checked => json!({ "folder": config.folder, "cloned": false }),
+        Ready::Adopted => json!({ "folder": config.folder, "cloned": false, "adopted": true }),
+    };
+    log::emit("initialized", fields);
+    Ok(())
 }
 
 /// Makes the folder ready for the service of `config`, as `mneme autosave init` does, and also
 /// takes a folder of files that is not a repository yet when the remote has no `main`, for
-/// `mneme init`.
+/// `mneme init`, which says what it did in a sentence of its own.
 ///
 /// # Errors
 ///
 /// Fails when Git is too old, or the folder cannot be made ready without deleting or
 /// overwriting a file.
-pub(crate) fn prepare(config: &Settings) -> Result<()> {
+pub(crate) fn prepare(config: &Settings) -> Result<Ready> {
     git_version::check(&config.git, "mneme init")?;
     ready(&Git::new(config), true)
 }
 
 /// Clones into a missing or empty folder, or checks an existing clone. With `adopt`, a folder
 /// of files that is not a repository becomes one on `main` when the remote has no `main` yet,
-/// so that the first save commits the files and pushes them.
-fn ready(git: &Git, adopt: bool) -> Result<()> {
+/// so that the first save commits the files and pushes them. Logs nothing: the caller says
+/// what happened.
+fn ready(git: &Git, adopt: bool) -> Result<Ready> {
     let url = git.url();
     let path = git.folder();
     let empty = match fs::read_dir(path) {
@@ -317,8 +314,7 @@ fn ready(git: &Git, adopt: bool) -> Result<()> {
         if !git.run(&["rev-parse", "-q", "--verify", "HEAD"])?.success {
             git.ok(&["symbolic-ref", "HEAD", "refs/heads/main"])?;
         }
-        log::emit("initialized", json!({ "folder": path, "cloned": true }));
-        return Ok(());
+        return Ok(Ready::Cloned);
     }
     if !git.git_dir().is_dir() {
         if adopt && git.git_dir().symlink_metadata().is_err() {
@@ -345,13 +341,12 @@ fn ready(git: &Git, adopt: bool) -> Result<()> {
     if branch != "refs/heads/main" {
         bail!("the folder is not on main. Check out main first");
     }
-    log::emit("initialized", json!({ "folder": path, "cloned": false }));
-    Ok(())
+    Ok(Ready::Checked)
 }
 
 /// Makes a folder of files a repository on `main` with `origin` set, when the remote has no
 /// `main` yet. No file is touched.
-fn adopt_files(git: &Git) -> Result<()> {
+fn adopt_files(git: &Git) -> Result<Ready> {
     let url = git.url();
     let path = git.folder();
     let asked = git.ask_remote()?;
@@ -371,9 +366,5 @@ fn adopt_files(git: &Git) -> Result<()> {
         bail!("git init failed: {}", run.error());
     }
     git.ok(&["remote", "add", "origin", url])?;
-    log::emit(
-        "initialized",
-        json!({ "folder": path, "cloned": false, "adopted": true }),
-    );
-    Ok(())
+    Ok(Ready::Adopted)
 }

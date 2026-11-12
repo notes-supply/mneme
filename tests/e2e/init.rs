@@ -11,7 +11,7 @@ use mneme::autosave::{Autosave, Login, Outcome, Remote, Settings};
 use tempfile::TempDir;
 
 use crate::git::Isolation;
-use crate::remote::{bare_wiki, fake_ssh, mneme, write_quiet};
+use crate::remote::{bare_wiki, mneme, write_quiet};
 use crate::server::{MACHINES, Server};
 
 /// A machine with a home of its own, a `systemctl` that only records what it is asked, and
@@ -99,6 +99,11 @@ fn init_clones_writes_the_unit_with_absolute_paths_and_starts_the_service() {
     let output = machine.init(&args);
     assert!(output.status.success(), "{output:?}");
     assert!(folder.join("notes.md").exists(), "the wiki was cloned");
+    assert!(
+        stdout(&output).starts_with(&format!("Cloned the wiki into {folder_arg}.\n")),
+        "{output:?}"
+    );
+    assert_eq!(stderr(&output), "", "a person reads no log lines");
     assert_eq!(
         machine.systemctl(),
         "--user daemon-reload\n--user enable --now mneme-autosave.service\n"
@@ -128,6 +133,11 @@ fn init_clones_writes_the_unit_with_absolute_paths_and_starts_the_service() {
 
     let again = machine.init(&args);
     assert!(again.status.success(), "init can run again: {again:?}");
+    assert!(
+        stdout(&again).starts_with(&format!("{folder_arg} is a clone of the wiki already.\n")),
+        "{again:?}"
+    );
+    assert_eq!(stderr(&again), "");
     assert_eq!(machine.unit(), unit);
     assert_eq!(
         machine.systemctl(),
@@ -245,6 +255,11 @@ fn init_takes_a_folder_of_files_when_the_remote_has_no_main_and_refuses_otherwis
         "--no-service",
     ]);
     assert!(output.status.success(), "{output:?}");
+    assert!(
+        stdout(&output).contains("is a Git repository now, and the service's first save"),
+        "{output:?}"
+    );
+    assert_eq!(stderr(&output), "");
     assert_eq!(
         git.ok(&folder, &["symbolic-ref", "HEAD"]).trim(),
         "refs/heads/main"
@@ -323,7 +338,7 @@ fn init_puts_the_wiki_in_home_and_names_the_machine_after_the_host() {
 }
 
 #[test]
-fn init_with_a_server_or_a_key_writes_their_absolute_paths() {
+fn init_with_a_server_writes_the_absolute_path_of_its_token_file() {
     let machine = Machine::new();
     let server = Server::empty(&machine.git);
     fs::write(machine.root().join("token"), MACHINES[1].1).unwrap();
@@ -358,33 +373,6 @@ fn init_with_a_server_or_a_key_writes_their_absolute_paths() {
             .contains(&format!("ReadWritePaths={}\n", folder.display())),
         "{}",
         machine.unit()
-    );
-
-    let remote = machine.root().join("remote");
-    fs::create_dir(&remote).unwrap();
-    let bare = bare_wiki(&machine.git, &remote);
-    fake_ssh(&machine.bin(), &machine.root().join("ssh.log"));
-    fs::write(machine.root().join("key"), "not really a key\n").unwrap();
-    let keyed = machine.root().join("keyed");
-    let url = format!("localhost:{}", bare.display());
-    let output = machine.init(&[
-        "--folder",
-        keyed.to_str().unwrap(),
-        "--remote",
-        &url,
-        "--ssh-key",
-        "key",
-        "--name",
-        "laptop",
-        "--no-service",
-    ]);
-    assert!(output.status.success(), "{output:?}");
-    assert!(
-        stdout(&output).contains(&format!(
-            "--remote {url} --ssh-key {} --name laptop",
-            machine.root().join("key").display()
-        )),
-        "{output:?}"
     );
 }
 
@@ -453,8 +441,10 @@ fn init_writes_the_path_of_a_file_url_into_the_units_writable_paths() {
     let bare = bare_wiki(git, machine.root());
     let spaced = machine.root().join("the wiki.git");
     fs::rename(&bare, &spaced).unwrap();
+    // The scheme in capitals too: Git reads `FILE://` as a remote helper's name unless it is
+    // lowercased first.
     let url = format!(
-        "file://localhost{}",
+        "FILE://localhost{}",
         spaced.to_str().unwrap().replace(' ', "%20")
     );
     let folder = machine.root().join("wiki");
@@ -468,6 +458,11 @@ fn init_writes_the_path_of_a_file_url_into_the_units_writable_paths() {
     ]);
     assert!(output.status.success(), "{output:?}");
     assert!(folder.join("notes.md").exists());
+    assert!(
+        git.ok(&folder, &["remote", "get-url", "origin"])
+            .starts_with("file://localhost"),
+        "origin has the scheme in lower case"
+    );
     let unit = machine.unit();
     assert!(
         unit.contains(&format!(

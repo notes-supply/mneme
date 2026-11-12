@@ -10,11 +10,16 @@ rust = { version = "nightly-2026-10-28", profile = "minimal", components = "rust
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
 "aqua:rhysd/actionlint" = "1.7.12"
 "aqua:zizmorcore/zizmor" = "1.30.1"
+"aqua:koalaman/shellcheck" = "0.11.0"
 "aqua:aquasecurity/trivy" = "0.76.2"
 # The release job: render, publish and sign the manifests (scripts/release.sh).
 "aqua:fluxcd/flux2" = "2.8.2"
 "aqua:sigstore/cosign" = "3.1.4"
 "aqua:kubernetes/kubectl" = "1.36.3"
+# The screenshots: compress them without loss (scripts/screenshots.sh).
+"aqua:oxipng/oxipng" = "10.2.1"
+# The binaries workflow: tag a version's image (binaries.yml).
+"aqua:google/go-containerregistry" = "0.22.1"
 
 [tasks.fmt]
 description = "Format the Rust sources"
@@ -41,6 +46,10 @@ run = "cargo deny --locked {% if env.MISE_OFFLINE %}--offline {% endif %}check a
 description = "Lint the CI workflow"
 run = ["actionlint", "zizmor --offline .github/workflows"]
 
+[tasks."check:shell"]
+description = "Lint the shell scripts"
+run = "shellcheck install.sh scripts/*.sh"
+
 [tasks.soak]
 description = "Run the autosave simulations over 2000 seeds and the kill test over 20"
 run = [
@@ -52,6 +61,10 @@ run = [
 description = "Build the server's image and check it with a real clone and push and a Trivy scan"
 run = "scripts/image.sh"
 
+[tasks.screenshots]
+description = "Make the README's screenshots in docs/images from a real run with invented content"
+run = "scripts/screenshots.sh"
+
 [tasks.gate]
 description = "Everything that proves the repository is good"
-depends = ["check:fmt", "check:clippy", "check:test", "check:advisories", "check:workflows"]
+depends = ["check:fmt", "check:clippy", "check:test", "check:advisories", "check:workflows", "check:shell"]

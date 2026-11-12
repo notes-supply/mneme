@@ -2,7 +2,8 @@ name: Binaries
 # On a version tag of a commit on main, builds a static mneme for x86_64 and aarch64 from the
 # Containerfile's build stage, so each binary is the one the image would hold, and attaches them
 # to a GitHub release with their checksums. Each is signed keyless as this file at that tag,
-# which is what `cosign verify-blob` in the README checks.
+# which is what `cosign verify-blob` in docs/install.md and install.sh check. It then tags the image
+# CI published for that commit with the version, and as latest.
 on:
   push:
     tags: ["v*"]
@@ -132,7 +133,90 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           gh release create "$TAG" --verify-tag --title "Mneme $TAG" \
-            --notes "Static Linux binaries of Mneme $TAG. The README says how to verify and install them." \
+            --notes "Static Linux binaries of Mneme $TAG. docs/install.md says how to verify and install them." \
             mneme-x86_64-linux mneme-x86_64-linux.sigstore.json \
             mneme-aarch64-linux mneme-aarch64-linux.sigstore.json \
             SHA256SUMS
+
+  image:
+    name: image
+    needs: [publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # read mise.toml for crane
+      packages: write # tag the image
+    # No concurrency group, so no release's version tag is ever cancelled.
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+      IMAGE: ghcr.io/notes-supply/mneme
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          install_args: aqua:google/go-containerregistry
+          cache: false
+      # CI's release job pushed this commit's image as $IMAGE:<commit> and signed its digest.
+      # A tag only names that digest, so the new tags need no new signature: cosign verify
+      # finds the one release.yml made.
+      - name: Tag the commit's image with the version
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          if ! printf '%s\n' "$version" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "$GITHUB_REF_NAME is not vX.Y.Z, so the image gets no tags"
+            exit 0
+          fi
+          printf '%s' "$GITHUB_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          if ! digest=$(crane digest "$IMAGE:$GITHUB_SHA"); then
+            echo "There is no image $IMAGE:$GITHUB_SHA. CI publishes one for a commit of main once its gate passed, if it is still main's head then. Rerun this job once it has, or tag a commit that has one." >&2
+            exit 1
+          fi
+          crane tag "$IMAGE@$digest" "$version"
+          echo "$IMAGE@$digest is now $IMAGE:$version"
+
+  # Points latest at the newest version that has an image, whichever release ran this. The
+  # answer is the same for every run, so one run at a time is enough: a run the group cancels
+  # while it waits leaves the work to the run that replaced it, which gives the same answer.
+  latest:
+    name: latest
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # read mise.toml for crane, and list the version tags
+      packages: write # move the latest tag
+    concurrency:
+      group: image-latest
+      cancel-in-progress: false
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+      IMAGE: ghcr.io/notes-supply/mneme
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          install_args: aqua:google/go-containerregistry
+          cache: false
+      - name: Point latest at the newest version's image
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GITHUB_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          versions=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            --jq '.[].ref | ltrimstr("refs/tags/v")' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -rV)
+          for version in $versions; do
+            if digest=$(crane digest "$IMAGE:$version" 2>/dev/null); then
+              crane tag "$IMAGE@$digest" latest
+              echo "$IMAGE:latest is $IMAGE:$version, $IMAGE@$digest"
+              exit 0
+            fi
+            echo "$IMAGE:$version has no image yet"
+          done
+          echo "No version has an image yet, so latest stays where it is"

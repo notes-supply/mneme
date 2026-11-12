@@ -177,26 +177,9 @@ fn autosave_takes_a_server_or_a_remote_and_only_the_login_that_fits_it() {
         ),
         (&["--server", "http://127.0.0.1:9"][..], 2, "--token-file"),
         (
-            &[
-                "--server",
-                "http://127.0.0.1:9",
-                "--token-file",
-                "token",
-                "--ssh-key",
-                "token",
-            ][..],
-            2,
-            "cannot be used with",
-        ),
-        (
-            &["--remote", "ssh://host/wiki.git", "--token-file", "token"][..],
+            &["--remote", "/srv/wiki.git", "--token-file", "token"][..],
             1,
             "--token-file is for an HTTPS remote",
-        ),
-        (
-            &["--remote", "https://host/wiki.git", "--ssh-key", "token"][..],
-            1,
-            "--ssh-key is for an SSH remote",
         ),
         (
             &["--remote", "https://me:secret@host/wiki.git"][..],

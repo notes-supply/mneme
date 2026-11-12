@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::autosave::{self, Remote, RemoteArgs, Settings};
+use crate::autosave::{self, Ready, Remote, RemoteArgs, Settings};
 
 /// The unit's name, and its file's.
 const UNIT: &str = "mneme-autosave.service";
@@ -53,7 +53,7 @@ pub fn run(args: &Args) -> Result<()> {
         Some(name) => name.clone(),
         None => short_host_name()?,
     };
-    let remote = args.remote.remote(true)?;
+    let remote = args.remote.remote()?;
     let command = service_command(args, &folder, &name, &remote)?;
     let systemctl = on_path("systemctl");
     let unit = match &systemctl {
@@ -71,7 +71,7 @@ pub fn run(args: &Args) -> Result<()> {
         }
         _ => None,
     };
-    autosave::prepare(&Settings {
+    let ready = autosave::prepare(&Settings {
         folder: folder.clone(),
         remote,
         machine: name,
@@ -81,7 +81,15 @@ pub fn run(args: &Args) -> Result<()> {
         stale_lock: Duration::from_secs(300),
         git: PathBuf::from("git"),
     })?;
-    println!("{} is ready.", folder.display());
+    match ready {
+        Ready::Cloned => println!("Cloned the wiki into {}.", folder.display()),
+        Ready::Checked => println!("{} is a clone of the wiki already.", folder.display()),
+        Ready::Adopted => println!(
+            "{} is a Git repository now, and the service's first save commits its files and \
+             pushes them.",
+            folder.display()
+        ),
+    }
     let Some((systemctl, path, text)) = unit else {
         if systemctl.is_none() {
             println!("systemctl is not on PATH, so no service is installed.");
@@ -157,12 +165,6 @@ fn service_command(args: &Args, folder: &Path, name: &str, remote: &Remote) -> R
     match remote {
         Remote::Server { url, .. } => command.extend(["--server".to_owned(), url.clone()]),
         Remote::Git { url, .. } => command.extend(["--remote".to_owned(), url.clone()]),
-    }
-    if let Some(key) = &args.remote.ssh_key {
-        command.extend([
-            "--ssh-key".to_owned(),
-            utf8(absolute(key)?.into_os_string())?,
-        ]);
     }
     if let Some(token) = &args.remote.token_file {
         command.extend([
@@ -297,7 +299,7 @@ mod tests {
     fn a_word_of_exec_start_is_quoted_and_escaped_for_systemd() {
         for (word, written) in [
             ("/usr/bin/mneme", "/usr/bin/mneme"),
-            ("ssh://host/~/wiki.git", "\"ssh://host/~/wiki.git\""),
+            ("https://host/~me/wiki.git", "\"https://host/~me/wiki.git\""),
             ("/home/a b/wiki", "\"/home/a b/wiki\""),
             ("100%", "\"100%%\""),
             ("$HOME", "\"$$HOME\""),
@@ -330,8 +332,8 @@ mod tests {
         assert_eq!(shell_word("/home/a b"), "'/home/a b'");
         assert_eq!(shell_word("it's"), r"'it'\''s'");
         assert_eq!(
-            shell_word("ssh://host/~/wiki.git"),
-            "'ssh://host/~/wiki.git'"
+            shell_word("https://host/~me/wiki.git"),
+            "'https://host/~me/wiki.git'"
         );
     }
 
