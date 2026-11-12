@@ -35,6 +35,17 @@ checksum_source = "mise-versions"
 url = "https://github.com/fluxcd/flux2/releases/download/v2.8.2/flux_2.8.2_linux_amd64.tar.gz"
 url_api = "https://api.github.com/repos/fluxcd/flux2/releases/assets/372401431"
 
+[[tools."aqua:google/go-containerregistry"]]
+version = "0.22.1"
+backend = "aqua:google/go-containerregistry"
+specifiers = ["0.22.1"]
+
+[tools."aqua:google/go-containerregistry"."platforms.linux-x64"]
+checksum = "sha256:0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0"
+checksum_source = "mise-versions"
+url = "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_x86_64.tar.gz"
+url_api = "https://api.github.com/repos/google/go-containerregistry/releases/assets/543544389"
+
 [[tools."aqua:koalaman/shellcheck"]]
 version = "0.11.0"
 backend = "aqua:koalaman/shellcheck"

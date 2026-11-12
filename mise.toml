@@ -16,6 +16,8 @@ rust = { version = "nightly-2026-10-28", profile = "minimal", components = "rust
 "aqua:fluxcd/flux2" = "2.8.2"
 "aqua:sigstore/cosign" = "3.1.4"
 "aqua:kubernetes/kubectl" = "1.36.3"
+# The binaries workflow: tag a version's image (binaries.yml).
+"aqua:google/go-containerregistry" = "0.22.1"
 
 [tasks.fmt]
 description = "Format the Rust sources"
