@@ -34,6 +34,17 @@ mneme autosave run  --folder ~/wiki --server https://host --token-file ~/.config
 
 A push to `main` deploys Mneme to Apollo once the gate passes on that commit. CI's release job pushes the image built by the `image` job to `ghcr.io/notes-supply/mneme` by digest, and `scripts/release.sh` packs `deploy/` with that digest as one OCI artifact, signs it keyless as `.github/workflows/release.yml` on `main`, and points its `main` tag at it. Flux on Apollo verifies that signature and applies `deploy/` in namespace `atrium`. `deploy/` holds only what a release may change: the Deployment. The cluster repository owns the Service, Ingress, network policy, the tokens Secret and the repository's volume, which the Deployment mounts by name.
 
+The cluster also checks every pod a release creates in namespace `atrium` and refuses it if it:
+
+- runs as a service account other than `default`;
+- mounts a service account token (keep `automountServiceAccountToken: false`);
+- mounts an inline CSI volume;
+- reads any Secret other than `mneme-tokens`;
+- names a pull secret;
+- carries the label `app.kubernetes.io/created-by=volsync`, which only the backup's Jobs may wear.
+
+A refused pod is never created, so that release never gets ready, which leaves Mneme down until a revert, as below.
+
 Roll back a bad release with a revert commit on `main`; it deploys the same way.
 A release whose pod never gets ready leaves Mneme down, since one pod holds the volume: Flux applies the revert once that release's 5-minute health check has timed out.
 Never retag the artifact by hand: Flux accepts only what the release workflow signed on `main`.
