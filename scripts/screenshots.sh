@@ -110,8 +110,10 @@ on() {
 }
 head_of() { on "$1" 'git -C ~/wiki rev-parse HEAD'; }
 server_head() { curl -fsS "$server/v1/status" | sed -n 's/.*"head":"\([0-9a-f]*\)".*/\1/p'; }
-# Whether a machine's folder is at the server's head, and holds `text` in `page`.
-synced() { [ "$(head_of "$1")" = "$(server_head)" ] && on "$1" "grep -qF '$3' ~/wiki/$2"; }
+# Whether a machine's folder is at the server's head, and its commit holds `text` in `page`.
+synced() {
+  [ "$(head_of "$1")" = "$(server_head)" ] && on "$1" "git -C ~/wiki grep -qF '$3' HEAD -- '$2'"
+}
 
 # The session the terminal image shows: one step per folder, numbered.
 session=$work/session
