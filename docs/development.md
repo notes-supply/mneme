@@ -17,7 +17,7 @@ The tests include a simulation of three clones and a server over 128 seeds, and 
 ## Build it
 
 ```sh
-cargo build --locked --release
+mise exec -- cargo build --locked --release
 ```
 
 The release binaries are built in the `Containerfile`'s build stage instead, static and with stable Rust, and the gate uses the nightly `mise.toml` names. [decisions.md](decisions.md) says why.
@@ -28,8 +28,15 @@ The release binaries are built in the `Containerfile`'s build stage instead, sta
 MNEME_PLAYWRIGHT=../atrium MNEME_CHROMIUM=$(command -v chromium) mise run screenshots
 ```
 
-remakes `docs/images/` from a real run with invented content: two machines, `laptop` and `desktop`, as containers of the server's image that sync with a third, and Atrium v0.1.0 reading the laptop's folder. `MNEME_PLAYWRIGHT` names a folder whose `node_modules` has Playwright, such as a checkout of Atrium after `npm ci`, and `MNEME_CHROMIUM` a Chromium to use instead of Playwright's own. `scripts/screenshots.sh` says what is real in them.
+remakes `docs/images/` from a real run with invented content: two machines, `laptop` and `desktop`, as containers of the server's image that sync with a third, and Atrium v0.1.0 reading the laptop's folder. It needs Podman, Node, Playwright and a Chromium: `MNEME_PLAYWRIGHT` names a folder whose `node_modules` has Playwright, such as a checkout of Atrium after `npm ci`, and `MNEME_CHROMIUM` a Chromium to use instead of Playwright's own. oxipng comes from mise. `scripts/screenshots.sh` says what is real in them.
 
 ## Release
 
-A push to `main` deploys, and a tag `vX.Y.Z` on a commit on `main` makes a release with signed binaries and tags the image with the version. Bump `version` in `Cargo.toml` first: the release refuses a binary whose `--version` is not the tag's. [deploy.md](deploy.md) has the details.
+A push to `main` deploys, and a tag `vX.Y.Z` on a commit on `main` makes a release with signed binaries and tags the image with the version. The release refuses a binary whose `--version` is not the tag's, so first:
+
+1. Set `version` in `Cargo.toml` to `X.Y.Z`.
+2. Run `mise exec -- cargo update --workspace`, which updates Mneme's own entry in `Cargo.lock` and nothing else.
+3. Commit both files, and merge the commit to `main` once the gate passes.
+4. Tag that commit `vX.Y.Z` and push the tag.
+
+[deploy.md](deploy.md) has the details.
