@@ -11,7 +11,7 @@ use mneme::autosave::{Autosave, Login, Outcome, Remote, Settings};
 use tempfile::TempDir;
 
 use crate::git::Isolation;
-use crate::remote::{bare_wiki, fake_ssh, mneme, write_quiet};
+use crate::remote::{bare_wiki, mneme, write_quiet};
 use crate::server::{MACHINES, Server};
 
 /// A machine with a home of its own, a `systemctl` that only records what it is asked, and
@@ -323,7 +323,7 @@ fn init_puts_the_wiki_in_home_and_names_the_machine_after_the_host() {
 }
 
 #[test]
-fn init_with_a_server_or_a_key_writes_their_absolute_paths() {
+fn init_with_a_server_writes_the_absolute_path_of_its_token_file() {
     let machine = Machine::new();
     let server = Server::empty(&machine.git);
     fs::write(machine.root().join("token"), MACHINES[1].1).unwrap();
@@ -358,33 +358,6 @@ fn init_with_a_server_or_a_key_writes_their_absolute_paths() {
             .contains(&format!("ReadWritePaths={}\n", folder.display())),
         "{}",
         machine.unit()
-    );
-
-    let remote = machine.root().join("remote");
-    fs::create_dir(&remote).unwrap();
-    let bare = bare_wiki(&machine.git, &remote);
-    fake_ssh(&machine.bin(), &machine.root().join("ssh.log"));
-    fs::write(machine.root().join("key"), "not really a key\n").unwrap();
-    let keyed = machine.root().join("keyed");
-    let url = format!("localhost:{}", bare.display());
-    let output = machine.init(&[
-        "--folder",
-        keyed.to_str().unwrap(),
-        "--remote",
-        &url,
-        "--ssh-key",
-        "key",
-        "--name",
-        "laptop",
-        "--no-service",
-    ]);
-    assert!(output.status.success(), "{output:?}");
-    assert!(
-        stdout(&output).contains(&format!(
-            "--remote {url} --ssh-key {} --name laptop",
-            machine.root().join("key").display()
-        )),
-        "{output:?}"
     );
 }
 

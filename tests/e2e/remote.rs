@@ -1,10 +1,9 @@
-//! `mneme autosave` with a plain Git remote: SSH through the user's own `ssh`, and HTTPS with a
+//! `mneme autosave` with a plain Git remote: a bare repository by its path, and HTTPS with a
 //! token as HTTP Basic authentication, against `git http-backend` behind a small test server.
 
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -50,19 +49,6 @@ pub fn mneme(git: &Isolation, bin: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mneme"));
     git.apply(&mut command).env("PATH", path);
     command
-}
-
-/// An `ssh` that writes its arguments to `log`, one run per line, and runs the remote command on
-/// this machine, as if every host were this one.
-pub fn fake_ssh(bin: &Path, log: &Path) {
-    let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nfor last; do :; done\n\
-         exec sh -c \"git ${{last#git-}}\"\n",
-        log.display()
-    );
-    fs::create_dir_all(bin).unwrap();
-    fs::write(bin.join("ssh"), script).unwrap();
-    fs::set_permissions(bin.join("ssh"), fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// A running `mneme autosave run` and what it has logged.
@@ -132,25 +118,19 @@ pub fn write_quiet(path: &Path, text: &str) {
 }
 
 #[test]
-fn an_ssh_remote_runs_the_users_ssh_with_no_prompt_and_learns_a_host_key_only_at_init() {
+fn a_path_remote_is_cloned_and_saved_to_by_the_service() {
     let git = Isolation::new();
     let root = TempDir::new().unwrap();
     let bare = bare_wiki(&git, root.path());
     let bin = root.path().join("bin");
-    let ssh_log = root.path().join("ssh.log");
-    fake_ssh(&bin, &ssh_log);
-    let key = root.path().join("deploy key");
-    fs::write(&key, "not really a key\n").unwrap();
     let folder = root.path().join("wiki");
-    let url = format!("localhost:{}", bare.display());
+    let url = bare.to_str().unwrap().to_owned();
     let args = |command: &str| {
         let mut args: Vec<String> = ["autosave", command, "--folder"].map(str::to_owned).into();
         args.extend([
             folder.to_str().unwrap().to_owned(),
             "--remote".to_owned(),
             url.clone(),
-            "--ssh-key".to_owned(),
-            key.to_str().unwrap().to_owned(),
             "--name".to_owned(),
             "laptop".to_owned(),
         ]);
@@ -164,15 +144,6 @@ fn an_ssh_remote_runs_the_users_ssh_with_no_prompt_and_learns_a_host_key_only_at
         git.ok(&folder, &["remote", "get-url", "origin"]).trim(),
         url
     );
-    let runs = fs::read_to_string(&ssh_log).unwrap();
-    let key_option = format!("-i {} -o IdentitiesOnly=yes", key.display());
-    assert!(
-        runs.lines().all(|run| run.starts_with("-o BatchMode=yes ")
-            && run.contains(&key_option)
-            && run.contains("-o StrictHostKeyChecking=accept-new")),
-        "{runs}"
-    );
-    fs::remove_file(&ssh_log).unwrap();
 
     let mut run = mneme(&git, &bin);
     run.args(args("run")).args([
@@ -184,23 +155,15 @@ fn an_ssh_remote_runs_the_users_ssh_with_no_prompt_and_learns_a_host_key_only_at
         "0.5",
     ]);
     let service = Service::start(run);
-    write_quiet(&folder.join("notes.md"), "# Notes\n\nSaved over SSH.\n");
+    write_quiet(&folder.join("notes.md"), "# Notes\n\nSaved to a path.\n");
     service.wait_for("pushed");
     let log = service.terminate();
     let pushed = git.ok(&bare, &["show", "main:notes.md"]);
-    assert_eq!(pushed, "# Notes\n\nSaved over SSH.\n");
+    assert_eq!(pushed, "# Notes\n\nSaved to a path.\n");
     assert_eq!(
         git.ok(&bare, &["log", "-1", "--format=%an <%ae>", "main"])
             .trim(),
         "laptop <autosave@laptop>"
-    );
-    let runs = fs::read_to_string(&ssh_log).unwrap();
-    assert!(!runs.is_empty(), "the service fetched and pushed with ssh");
-    assert!(
-        runs.lines().all(|run| run.starts_with("-o BatchMode=yes ")
-            && run.contains(&key_option)
-            && !run.contains("StrictHostKeyChecking")),
-        "the service never accepts a new host key: {runs}"
     );
     let started: Value = log
         .iter()
@@ -439,7 +402,6 @@ fn an_https_remote_gets_the_token_as_basic_authentication_and_nowhere_else() {
             &url,
             Login {
                 token: Some(Token(token.to_owned())),
-                ..Login::default()
             },
         )
         .unwrap(),

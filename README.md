@@ -1,6 +1,6 @@
 # Mneme
 
-Mneme keeps a Markdown wiki in Git, so that writers only edit files. `mneme autosave` runs on each writer's machine: it commits what has been still for a while, syncs with the other machines through a Git remote, and pushes. The remote can be any Git repository, such as a bare one over SSH or one on a Git host. An optional server, `mneme serve`, can hold the repository instead. It adds a push check that keeps the wiki's rules, a token per machine, each machine's state, and a reading API with pages, history, diffs and search.
+Mneme keeps a Markdown wiki in Git, so that writers only edit files. `mneme autosave` runs on each writer's machine: it commits what has been still for a while, syncs with the other machines through a Git remote, and pushes. The remote can be a repository on a Git host over HTTPS, or a bare one on the same machine. An optional server, `mneme serve`, can hold the repository instead. It adds a push check that keeps the wiki's rules, a token per machine, each machine's state, and a reading API with pages, history, diffs and search.
 
 ## Install
 
@@ -30,32 +30,22 @@ cargo install --locked --root ~/.local --git https://github.com/notes-supply/mne
 
 `mneme init` makes a wiki folder ready, installs the autosave service as a systemd user unit, and starts it. Run it once on each machine. The folder is `~/wiki` unless `--folder` names another, and the machine's name, which its autosave commits carry, is the short host name unless `--name` gives one. A missing or empty folder gets a clone. A folder of notes that is not a Git repository yet becomes one when the remote has no history, and the first save pushes the notes. The service's logs are in `journalctl --user -u mneme-autosave`. With `--no-service`, `mneme init` prints the command that runs the service instead of installing it.
 
-### A bare repository over SSH
+### A Git host over HTTPS
 
-Any machine you reach with `ssh` can hold the wiki, through keys or Tailscale SSH. Make the repository once:
-
-```sh
-ssh host git init --bare -b main wiki.git
-```
-
-Then on each machine:
+Make an empty repository on the host, and give each machine an access token that may write to it, such as a fine-grained token scoped to that one repository:
 
 ```sh
-mneme init --remote ssh://host/~/wiki.git
+mneme init --remote https://github.com/someone/wiki.git --token-file ~/.config/mneme/token
 ```
 
-The service runs your own `ssh`, so `~/.ssh/config`, your keys and Tailscale SSH work as they do in a terminal. It never answers a question: it needs a key without a passphrase, an agent that the service can reach, or Tailscale SSH, and only `mneme init` may learn a new host key.
+The token file holds the token and nothing else. It is sent as the password of HTTP Basic authentication, and only to that URL.
 
-### A Git host with a deploy key
-
-Give each machine a key of its own and add its public half to the repository as a deploy key with write access:
+### A repository on this machine
 
 ```sh
-ssh-keygen -t ed25519 -N '' -f ~/.ssh/wiki-deploy
-mneme init --remote git@github.com:someone/wiki.git --ssh-key ~/.ssh/wiki-deploy
+git init --bare -b main ~/wiki.git
+mneme init --remote ~/wiki.git
 ```
-
-ssh then uses that key alone. Over HTTPS, `--token-file` takes a file that holds an access token instead, which is sent as the password of HTTP Basic authentication.
 
 ### A Mneme server
 
@@ -99,7 +89,7 @@ Each writer's machine runs `mneme autosave` on its wiki folder. Writers only edi
 `mneme init` writes the unit with the command it runs, which is one of:
 
 ```sh
-mneme autosave run --folder ~/wiki --remote ssh://host/~/wiki.git --name laptop
+mneme autosave run --folder ~/wiki --remote https://github.com/someone/wiki.git --token-file ~/.config/mneme/token --name laptop
 mneme autosave run --folder ~/wiki --server https://host --token-file ~/.config/mneme/token --name laptop
 ```
 

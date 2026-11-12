@@ -36,13 +36,9 @@ pub struct RemoteArgs {
     /// URL's user name, or `git` when it has none.
     #[arg(long, required_unless_present = "remote")]
     pub token_file: Option<PathBuf>,
-    /// An SSH key that ssh uses alone for the remote, such as a deploy key of this machine's
-    /// own. Without it, ssh logs in as it does in a terminal.
-    #[arg(long, conflicts_with = "server")]
-    pub ssh_key: Option<PathBuf>,
 }
 
-/// A Mneme server or any Git remote, and never both.
+/// A Mneme server or a Git remote, and never both.
 #[derive(Debug, clap::Args)]
 #[group(required = true, multiple = false)]
 pub struct To {
@@ -50,8 +46,8 @@ pub struct To {
     /// lists each machine's state.
     #[arg(long)]
     pub server: Option<String>,
-    /// Any Git remote, as `origin` will name it: `ssh://host/~/wiki.git`,
-    /// `git@host:wiki.git`, `https://host/wiki.git`, or a path.
+    /// A Git remote, as `origin` will name it: a Git host's `https://host/wiki.git`, or a
+    /// path or `file://` URL on this machine. SSH, `git://` and remote helpers are refused.
     #[arg(long)]
     pub remote: Option<String>,
 }
@@ -110,10 +106,9 @@ pub fn main(command: Command) -> Result<()> {
 }
 
 impl Target {
-    /// The settings of `run`, or of `init` when `run` is `None`. Only `init` lets ssh learn a
-    /// new host key.
+    /// The settings of `run`, or of `init` when `run` is `None`.
     fn config(&self, run: Option<&Run>) -> Result<Settings> {
-        let remote = self.remote.remote(run.is_none())?;
+        let remote = self.remote.remote()?;
         let timing = |pick: fn(&Run) -> Duration, default: u64| {
             run.map_or(Duration::from_secs(default), pick)
         };
@@ -131,30 +126,20 @@ impl Target {
 }
 
 impl RemoteArgs {
-    /// The remote, with what it logs in with. `learn_host_key` lets ssh accept the key of a
-    /// host it has never seen, which only a first clone needs.
+    /// The remote, with what it logs in with.
     ///
     /// # Errors
     ///
-    /// Fails when the token file or the key cannot be read, or they do not fit the remote.
-    pub fn remote(&self, learn_host_key: bool) -> Result<Remote> {
+    /// Fails when the token file cannot be read, the remote is not one Mneme syncs with, or
+    /// the token does not fit it.
+    pub fn remote(&self) -> Result<Remote> {
         let token = self.token_file.as_deref().map(read_token).transpose()?;
         match (&self.to.server, &self.to.remote) {
             (Some(server), _) => Ok(Remote::Server {
                 url: server.trim_end_matches('/').to_owned(),
                 token: token.context("a server needs --token-file")?,
             }),
-            (None, Some(url)) => {
-                let ssh_key = self.ssh_key.as_deref().map(key_file).transpose()?;
-                Remote::git(
-                    url,
-                    Login {
-                        ssh_key,
-                        accept_new_host_key: learn_host_key,
-                        token,
-                    },
-                )
-            }
+            (None, Some(url)) => Remote::git(url, Login { token }),
             (None, None) => bail!("name a --server or a --remote"),
         }
     }
@@ -178,13 +163,6 @@ fn read_token(file: &Path) -> Result<Token> {
         bail!("the token file {} is empty", file.display());
     }
     Ok(Token(token.to_owned()))
-}
-
-/// The key at `file`, as an absolute path, once it is known to be readable. ssh runs in the
-/// folder, so a relative path would not find it.
-fn key_file(file: &Path) -> Result<PathBuf> {
-    File::open(file).with_context(|| format!("reading the key file {}", file.display()))?;
-    std::path::absolute(file).with_context(|| format!("finding {}", file.display()))
 }
 
 /// Takes the folder for this service alone, until the returned file is closed when the service

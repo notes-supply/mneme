@@ -1,6 +1,7 @@
-//! Where a service syncs: a Mneme server, or any Git remote by its URL. A server checks every
-//! push and takes the service's reports. Any other remote only stores what it is sent, and the
-//! service logs in to it with the user's own ssh, or with a token over HTTPS.
+//! Where a service syncs: a Mneme server, or a Git remote by its URL. A server checks every
+//! push and takes the service's reports. A Git remote, a Git host over HTTPS or a repository
+//! on this machine, only stores what it is sent, and the service logs in to a Git host with a
+//! token.
 
 use std::path::{Path, PathBuf};
 
@@ -10,47 +11,46 @@ use base64::engine::general_purpose::STANDARD;
 
 use super::Token;
 
+/// The refusal of a remote Mneme does not sync with, which says what it syncs with.
+const UNSUPPORTED: &str = "--remote takes a Git host over HTTPS (https://HOST/PATH, with \
+     --token-file for its token) or a repository on this machine (a path or a file:// URL), \
+     and a Mneme server is --server URL. Plain http:// works only to localhost, 127.0.0.1 or \
+     [::1], and SSH, git:// and remote helpers are not supported";
+
 /// Where a service syncs, and how it logs in.
 #[derive(Clone, Debug)]
 pub enum Remote {
     /// A Mneme server, by its base URL, such as `https://mneme.example`, with this machine's
     /// token. Its Git routes are below the URL.
     Server { url: String, token: Token },
-    /// Any Git remote, by the URL `origin` has.
+    /// A Git host over HTTPS or a repository on this machine, by the URL `origin` has.
     Git { url: String, login: Login },
 }
 
 /// How the service logs in to a Git remote that is not a Mneme server.
 #[derive(Clone, Debug, Default)]
 pub struct Login {
-    /// For SSH, a key that ssh uses alone, such as a deploy key of this machine's own.
-    pub ssh_key: Option<PathBuf>,
-    /// For SSH, whether ssh learns the key of a host it has never seen. Only `init` does, so
-    /// that its first clone can, and the service itself never accepts a new key.
-    pub accept_new_host_key: bool,
     /// For HTTPS, a token sent as the password of HTTP Basic authentication.
     pub token: Option<Token>,
 }
 
-/// How Git reaches a remote, by the rules Git itself reads a URL with.
+/// How Git reaches a remote that Mneme syncs with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transport {
-    /// `ssh://`, `git+ssh://` or `ssh+git://`, or the short form `[user@]host:path`.
-    Ssh,
-    /// `https://`, or `http://`.
+    /// `https://`, or `http://` to this machine.
     Http,
     /// A path, or `file://`.
     Local,
-    /// Any other scheme, or a remote helper's `name::address`.
-    Other,
 }
 
 impl Transport {
-    /// How Git reaches `url`. A URL is `scheme://...`, a remote helper is `name::...`, and
-    /// otherwise a colon before any slash makes it the short form of SSH, as in
-    /// `git@example.com:wiki.git`.
+    /// How Git reaches `url`, or `None` for a remote Mneme does not sync with. Git reads
+    /// `scheme://...` as a URL and `name::...` as a remote helper, and otherwise a colon before
+    /// any slash as the short form of SSH, as in `git@example.com:wiki.git`, and the rest as a
+    /// path. Of these, only `https://`, `http://` to localhost, `127.0.0.1` or `[::1]`,
+    /// `file://` and a path are taken.
     #[must_use]
-    pub fn of(url: &str) -> Self {
+    pub fn of(url: &str) -> Option<Self> {
         let scheme_end = url
             .char_indices()
             .find(|&(at, c)| {
@@ -65,19 +65,19 @@ impl Transport {
         let rest = &url[scheme_end..];
         if scheme_end > 0 && rest.starts_with("://") {
             return match url[..scheme_end].to_ascii_lowercase().as_str() {
-                "ssh" | "git+ssh" | "ssh+git" => Self::Ssh,
-                "http" | "https" => Self::Http,
-                "file" => Self::Local,
-                _ => Self::Other,
+                "https" => Some(Self::Http),
+                "http" if !in_clear(url) => Some(Self::Http),
+                "file" => Some(Self::Local),
+                _ => None,
             };
         }
         if scheme_end > 0 && rest.starts_with("::") {
-            return Self::Other;
+            return None;
         }
         match (url.find(':'), url.find('/')) {
-            (None, _) => Self::Local,
-            (Some(colon), Some(slash)) if slash < colon => Self::Local,
-            (Some(_), _) => Self::Ssh,
+            (None, _) => Some(Self::Local),
+            (Some(colon), Some(slash)) if slash < colon => Some(Self::Local),
+            (Some(_), _) => None,
         }
     }
 }
@@ -88,29 +88,16 @@ impl Remote {
     ///
     /// # Errors
     ///
-    /// Fails when the login does not fit the remote: a key for anything but SSH, a token for
-    /// anything but HTTPS, or a password in an HTTPS URL, which belongs in a token file. A token
-    /// over plain `http://` is refused too unless the host is this machine, since it would cross
-    /// the network in clear text, and so is a key whose path is not UTF-8, since ssh gets it in
-    /// a line of configuration.
+    /// Fails for a remote Mneme does not sync with, such as SSH, `git://`, a remote helper or
+    /// plain `http://` to another machine, which would send the wiki and any token in clear
+    /// text. Fails too when the login does not fit the remote: a token for anything but HTTPS,
+    /// or a password in an HTTPS URL, which belongs in a token file.
     pub fn git(url: &str, login: Login) -> Result<Self> {
-        let transport = Transport::of(url);
-        if let Some(key) = &login.ssh_key {
-            if transport != Transport::Ssh {
-                bail!("--ssh-key is for an SSH remote, and {url} is not one");
-            }
-            if key.to_str().is_none() {
-                bail!("the key's path {} is not UTF-8", key.display());
-            }
-        }
+        let Some(transport) = Transport::of(url) else {
+            bail!(UNSUPPORTED);
+        };
         if login.token.is_some() && transport != Transport::Http {
             bail!("--token-file is for an HTTPS remote, and {url} is not one");
-        }
-        if login.token.is_some() && in_clear(url) {
-            bail!(
-                "{url} is plain http, which would send the token in clear text. Use an \
-                 https:// URL, or http:// only to localhost, 127.0.0.1 or [::1]"
-            );
         }
         if transport == Transport::Http && userinfo(url).is_some_and(|info| info.contains(':')) {
             bail!(
@@ -152,7 +139,7 @@ impl Remote {
         let Self::Git { url, .. } = self else {
             return Ok(None);
         };
-        if Transport::of(url) != Transport::Local {
+        if Transport::of(url) != Some(Transport::Local) {
             return Ok(None);
         }
         let Some(rest) = file_url(url) else {
@@ -184,43 +171,18 @@ impl Remote {
                 format!("http.{url}.extraHeader"),
                 format!("Authorization: Bearer {}", token.0),
             )],
-            Self::Git { url, login } => match Transport::of(url) {
-                Transport::Ssh => vec![("core.sshCommand".to_owned(), ssh_command(login))],
-                Transport::Http => login
-                    .token
-                    .iter()
-                    .map(|token| {
-                        (
-                            format!("http.{url}.extraHeader"),
-                            format!("Authorization: Basic {}", basic(url, &token.0)),
-                        )
-                    })
-                    .collect(),
-                Transport::Local | Transport::Other => Vec::new(),
-            },
+            Self::Git { url, login } => login
+                .token
+                .iter()
+                .map(|token| {
+                    (
+                        format!("http.{url}.extraHeader"),
+                        format!("Authorization: Basic {}", basic(url, &token.0)),
+                    )
+                })
+                .collect(),
         }
     }
-}
-
-/// The user's own ssh, which never asks a person anything. ssh still reads `~/.ssh/config`,
-/// the user's keys and the agent, so a host alias, a jump host or Tailscale SSH works as it does
-/// in a terminal.
-fn ssh_command(login: &Login) -> String {
-    let mut command = "ssh -o BatchMode=yes".to_owned();
-    if let Some(key) = &login.ssh_key {
-        command.push_str(" -i ");
-        command.push_str(&shell_quote(&key.to_string_lossy()));
-        command.push_str(" -o IdentitiesOnly=yes");
-    }
-    if login.accept_new_host_key {
-        command.push_str(" -o StrictHostKeyChecking=accept-new");
-    }
-    command
-}
-
-/// `text` as one word for the shell that Git runs `core.sshCommand` with.
-fn shell_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
 }
 
 /// The credentials of HTTP Basic authentication: the URL's user name, or `git` when it has none,
@@ -294,25 +256,53 @@ fn percent_decode(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn token() -> Login {
+        Login {
+            token: Some(Token("s3cret".to_owned())),
+        }
+    }
+
     #[test]
     fn a_url_is_read_as_git_reads_it() {
         for (url, transport) in [
-            ("ssh://host/~/wiki.git", Transport::Ssh),
-            ("ssh://git@host:2222/srv/wiki.git", Transport::Ssh),
-            ("git+ssh://host/wiki.git", Transport::Ssh),
-            ("SSH://host/wiki.git", Transport::Ssh),
-            ("git@github.com:someone/wiki.git", Transport::Ssh),
-            ("host:wiki.git", Transport::Ssh),
             ("https://example.com/wiki.git", Transport::Http),
+            ("HTTPS://example.com/wiki.git", Transport::Http),
             ("http://127.0.0.1:8080/wiki.git", Transport::Http),
             ("file:///srv/wiki.git", Transport::Local),
             ("/srv/wiki.git", Transport::Local),
             ("wiki.git", Transport::Local),
             ("./a:b/wiki.git", Transport::Local),
-            ("git://example.com/wiki.git", Transport::Other),
-            ("ext::ssh -i key host %S wiki.git", Transport::Other),
         ] {
-            assert_eq!(Transport::of(url), transport, "{url}");
+            assert_eq!(Transport::of(url), Some(transport), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_remote_mneme_does_not_sync_with_is_refused_with_what_it_takes() {
+        for url in [
+            "ssh://host/~/wiki.git",
+            "ssh://git@host:2222/srv/wiki.git",
+            "SSH://host/wiki.git",
+            "git+ssh://host/wiki.git",
+            "ssh+git://host/wiki.git",
+            "git@github.com:someone/wiki.git",
+            "host:wiki.git",
+            "git://example.com/wiki.git",
+            "ext::ssh -i key host %S wiki.git",
+            "fd::3",
+            "https::example.com/wiki.git",
+            "ftp://example.com/wiki.git",
+            "http://example.com/wiki.git",
+            "http://192.168.1.10/wiki.git",
+        ] {
+            assert_eq!(Transport::of(url), None, "{url}");
+            for login in [Login::default(), token()] {
+                let refused = Remote::git(url, login).unwrap_err().to_string();
+                for named in ["--server", "https://", "--token-file", "a path", "SSH"] {
+                    assert!(refused.contains(named), "{url}: {refused}");
+                }
+                assert!(!refused.contains("s3cret"), "{url}: {refused}");
+            }
         }
     }
 
@@ -321,36 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_never_prompts_and_learns_a_host_key_only_when_asked() {
-        let plain = Remote::git("ssh://host/~/wiki.git", Login::default()).unwrap();
-        assert_eq!(
-            login(&plain),
-            [("core.sshCommand".into(), "ssh -o BatchMode=yes".into())]
-        );
-        let keyed = Remote::git(
-            "git@example.com:wiki.git",
-            Login {
-                ssh_key: Some("/home/u/.ssh/wiki deploy's key".into()),
-                accept_new_host_key: true,
-                token: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            login(&keyed),
-            [(
-                "core.sshCommand".into(),
-                r"ssh -o BatchMode=yes -i '/home/u/.ssh/wiki deploy'\''s key' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new".into()
-            )]
-        );
-    }
-
-    #[test]
     fn an_https_token_is_basic_authentication_scoped_to_the_url() {
-        let token = || Login {
-            token: Some(Token("s3cret".to_owned())),
-            ..Login::default()
-        };
         let url = "https://example.com/wiki.git";
         let anonymous = Remote::git(url, token()).unwrap();
         assert_eq!(
@@ -371,22 +332,14 @@ mod tests {
         );
         let without = Remote::git("https://example.com/wiki.git", Login::default()).unwrap();
         assert!(login(&without).is_empty(), "no token, no header");
+        let path = Remote::git("/srv/wiki.git", Login::default()).unwrap();
+        assert!(login(&path).is_empty(), "a path needs no login");
     }
 
     #[test]
     fn a_login_that_does_not_fit_the_remote_is_refused() {
-        let key = || Login {
-            ssh_key: Some("/key".into()),
-            ..Login::default()
-        };
-        let token = || Login {
-            token: Some(Token("t".to_owned())),
-            ..Login::default()
-        };
         for (url, login) in [
-            ("https://example.com/wiki.git", key()),
-            ("/srv/wiki.git", key()),
-            ("ssh://host/wiki.git", token()),
+            ("/srv/wiki.git", token()),
             ("file:///srv/wiki.git", token()),
             (
                 "https://user:password@example.com/wiki.git",
@@ -399,10 +352,6 @@ mod tests {
 
     #[test]
     fn a_token_over_plain_http_is_refused_unless_the_host_is_this_machine() {
-        let token = || Login {
-            token: Some(Token("s3cret".to_owned())),
-            ..Login::default()
-        };
         for url in [
             "http://example.com/wiki.git",
             "HTTP://example.com:8080/wiki.git",
@@ -426,10 +375,6 @@ mod tests {
         ] {
             assert!(Remote::git(url, token()).is_ok(), "{url}");
         }
-        assert!(
-            Remote::git("http://example.com/wiki.git", Login::default()).is_ok(),
-            "without a token, nothing secret is sent"
-        );
     }
 
     #[test]
@@ -441,8 +386,8 @@ mod tests {
         assert!(url.ends_with("/wiki.git"), "{url}");
         for given in [
             "file:///srv/wiki.git",
-            "ssh://host/~/wiki.git",
-            "host:wiki.git",
+            "https://example.com/wiki.git",
+            "http://localhost:8080/wiki.git",
         ] {
             let remote = Remote::git(given, Login::default()).unwrap();
             assert_eq!(remote.origin(), given);
@@ -466,7 +411,6 @@ mod tests {
             Some("/srv/wiki.git".into())
         );
         assert!(path("file://example.com/srv/wiki.git").is_err());
-        assert_eq!(path("ssh://host/~/wiki.git").unwrap(), None);
         assert_eq!(path("https://example.com/wiki.git").unwrap(), None);
         let server = Remote::Server {
             url: "https://mneme.example".to_owned(),
@@ -477,14 +421,7 @@ mod tests {
 
     #[test]
     fn a_token_never_shows_in_debug_output() {
-        let remote = Remote::git(
-            "https://example.com/wiki.git",
-            Login {
-                token: Some(Token("s3cret".to_owned())),
-                ..Login::default()
-            },
-        )
-        .unwrap();
+        let remote = Remote::git("https://example.com/wiki.git", token()).unwrap();
         assert!(!format!("{remote:?}").contains("s3cret"));
     }
 }
