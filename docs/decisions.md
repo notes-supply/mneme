@@ -38,7 +38,9 @@ Choices made while building Mneme that the design brief left open or that differ
 
 ## Git over HTTPS
 
-- **The tokens file is one JSON object** of machine name to hexadecimal SHA-256.
+- **The tokens file is one JSON object** of machine name to hexadecimal SHA-256, or to an object `{ "sha256", "access" }` with `access` `read` or `write`. A plain hash means `write`, so a tokens file written before means what it did. The object is read by hand rather than by serde's derive, so that a bad entry is refused with its machine and key named; an unknown key is refused, since a misspelt `acess` would otherwise leave a mirror with write access.
+- **A read-only token is refused a push before Git runs.** The server reads the service itself: from the path for `git-upload-pack` and `git-receive-pack`, and for `info/refs` from the last `service` in the query, as `git http-backend` reads it. It then gives http-backend only `service=git-upload-pack`, `service=git-receive-pack` or no query, so what it checked is what Git runs. A `service` spelt another way, such as with a percent escape, reaches Git as the dumb protocol's ref listing, which only reads. The refusal is `403` with a `text/plain` body, which Git prints as `remote:` lines before its own error. It stores no report and is not a sync, so `seen` stays.
+- **`--tokens-env NAME` is the other way to give the tokens,** the same JSON from an environment variable, since a container platform injects a secret as one. `--repo` takes exactly one of `--tokens` and `--tokens-env`, and either is read once at start.
 - **A 401 carries `WWW-Authenticate: Bearer`** and no body. HTTP asks for the header, and it says nothing about why.
 - **Only the three smart HTTP routes exist.** The dumb protocol is not served.
 - **A body over 64 MiB** is refused with 413 when its length is declared, and cut off when it is streamed.

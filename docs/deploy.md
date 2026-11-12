@@ -9,7 +9,13 @@ printf '{ "laptop": "%s" }\n' "$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)
 mneme serve --repo /data/wiki.git --tokens tokens.json --addr 0.0.0.0:8080
 ```
 
-The tokens file maps each machine's name to the SHA-256 of its token, and each machine runs `mneme init --server URL --token-file FILE` with its own token and that name. The server creates the repository when it is missing and installs its push check, which refuses what breaks the wiki's rules: a symlink, a submodule, a path named `.git`, a page over 1 MiB, a file over 10 MiB, or a deletion of `main`. Machines sync over `/git/wiki.git` with their tokens and report their state, which `/v1/machines` lists.
+The tokens file maps each machine's name to the SHA-256 of its token, and each machine runs `mneme init --server URL --token-file FILE` with its own token and that name. An entry can also be an object, for a machine that only keeps a copy and needs no more than to fetch:
+
+```json
+{ "laptop": "9f86d081…", "mirror": { "sha256": "2c26b46b…", "access": "read" } }
+```
+
+A read-only token may clone, fetch and report its machine's state, and a push with it is refused with a reason Git shows. `access` is `write` when it is left out, as for a plain hash, and any other key or value is refused at start. `--tokens-env NAME` takes the same JSON from an environment variable instead of a file, as a container platform gives a secret. The server creates the repository when it is missing and installs its push check, which refuses what breaks the wiki's rules: a symlink, a submodule, a path named `.git`, a page over 1 MiB, a file over 10 MiB, or a deletion of `main`. Machines sync over `/git/wiki.git` with their tokens and report their state, which `/v1/machines` lists.
 
 It needs Git 2.45 or newer on `PATH`, with `git http-backend`, and refuses to start with an older one. It listens on `127.0.0.1:8080` unless `--addr` says otherwise, logs JSON lines on standard error, and stops on SIGTERM.
 

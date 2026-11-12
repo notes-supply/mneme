@@ -42,16 +42,22 @@ const FOLDER_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST),
 
 /// Where `mneme serve` finds the wiki and listens.
 #[derive(Debug, clap::Args)]
+#[command(group(clap::ArgGroup::new("tokens_from").args(["tokens", "tokens_env"])))]
 pub struct Args {
     /// The bare repository of the wiki. It is created when it is missing.
-    #[arg(long, required_unless_present = "folder", requires = "tokens")]
+    #[arg(long, required_unless_present = "folder", requires = "tokens_from")]
     pub repo: Option<PathBuf>,
-    /// A JSON object that maps each machine's name to the SHA-256 of its token.
+    /// A JSON file that maps each machine's name to the SHA-256 of its token, or to an object
+    /// with that hash as `sha256` and `access` set to `read` or `write`.
     #[arg(long, requires = "repo")]
     pub tokens: Option<PathBuf>,
+    /// The same JSON as --tokens, from this environment variable instead of a file, as a
+    /// container platform gives a secret.
+    #[arg(long, value_name = "NAME", requires = "repo")]
+    pub tokens_env: Option<String>,
     /// A clone of the wiki on this machine, whose `main` is read and followed. Only the reading
     /// API is served, on loopback, and nothing is written to the folder.
-    #[arg(long, conflicts_with_all = ["repo", "tokens"])]
+    #[arg(long, conflicts_with_all = ["repo", "tokens", "tokens_env"])]
     pub folder: Option<PathBuf>,
     /// The address to listen on. The default is 127.0.0.1:8080 with --repo, and 127.0.0.1:8081
     /// with --folder, which listens on a loopback address only.
@@ -164,18 +170,23 @@ impl Wiki {
 /// Fails when `git` is too old for the server, the repository cannot be read, or the address
 /// cannot be bound or is not loopback for a folder.
 pub async fn run(args: Args) -> Result<()> {
-    match (&args.folder, &args.repo, &args.tokens) {
-        (Some(folder), None, None) => serve_folder(folder, &args).await,
-        (None, Some(repo), Some(tokens)) => serve_repo(repo.clone(), tokens, &args).await,
-        _ => bail!("mneme serve takes --repo with --tokens, or --folder"),
+    match (&args.folder, &args.repo) {
+        (Some(folder), None) => serve_folder(folder, &args).await,
+        (None, Some(repo)) => serve_repo(repo.clone(), &args).await,
+        _ => bail!("mneme serve takes --repo with --tokens or --tokens-env, or --folder"),
     }
 }
 
 /// The server: the bare repository over HTTPS for the clones, and the reading API.
-async fn serve_repo(path: PathBuf, tokens: &Path, args: &Args) -> Result<()> {
+async fn serve_repo(path: PathBuf, args: &Args) -> Result<()> {
     git_version::check(Path::new("git"), "mneme serve")?;
     let stopping = stop_signal(args.exit_with_parent)?;
-    let tokens = Tokens::load(tokens)?;
+    let tokens = match (&args.tokens, &args.tokens_env) {
+        (Some(file), None) => Tokens::load(file)?,
+        (None, Some(name)) => Tokens::from_env(name)?,
+        _ => bail!("mneme serve --repo takes one of --tokens and --tokens-env"),
+    };
+    let tokens = Arc::new(tokens);
     let names: Vec<String> = tokens.names().map(str::to_owned).collect();
     let wiki = tokio::task::spawn_blocking(move || -> Result<Wiki> {
         git_http::prepare(&path)?;

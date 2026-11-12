@@ -138,6 +138,8 @@ An autosave service reports its state in a `Mneme-Report` header on a Git reques
 
 The server stores the report and answers the Git request as usual. A request that carries a report does not change `seen`. A header over 4 KiB is `413`, one that is not base64 or not JSON is `400`, and a report with missing or unknown fields or bad values is `422`, each with `{ "error" }` and without running the Git request. A request without the right token is `401` with no body, whatever it carries.
 
+A machine whose token is read-only (`"access": "read"` in the tokens file) may fetch and report like any other. A push with it is refused before Git runs: `info/refs?service=git-receive-pack` and `git-receive-pack` answer `403` with a one-line `text/plain` reason, which Git shows to the user, and store nothing.
+
 The autosave service sends these states. The detail is empty unless the list says otherwise.
 
 | `state` | Meaning |

@@ -92,7 +92,8 @@ A plain remote stores what it is sent. It has no push check, so a commit made by
 | Option | |
 |---|---|
 | `--repo DIR` | The wiki's bare repository, created when it is missing. A server: Git over `/git/wiki.git`, the push check, machine state and the reading API. |
-| `--tokens FILE` | With `--repo`: a JSON object that maps each machine's name to the SHA-256 of its token. |
+| `--tokens FILE` | With `--repo`: a JSON object that maps each machine's name to the SHA-256 of its token, or to `{ "sha256", "access" }` with `access` `read` or `write` ([deploy.md](deploy.md#run-a-server)). |
+| `--tokens-env NAME` | Instead of `--tokens`: the same JSON from the environment variable `NAME`. |
 | `--folder DIR` | Instead of `--repo`: only the reading API of a clone on this machine, on loopback. |
 | `--addr ADDR` | Where to listen. `127.0.0.1:8080` with `--repo`, `127.0.0.1:8081` with `--folder`. |
 
