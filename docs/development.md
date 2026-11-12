@@ -18,7 +18,6 @@ The tests include a simulation of three clones and a server over 128 seeds, and 
 
 ```sh
 cargo build --locked --release
-cargo install --locked --root ~/.local --git https://github.com/notes-supply/mneme --tag v0.1.0
 ```
 
 The release binaries are built in the `Containerfile`'s build stage instead, static and with stable Rust, and the gate uses the nightly `mise.toml` names. [decisions.md](decisions.md) says why.

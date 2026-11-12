@@ -20,7 +20,7 @@ set -eu
 
 releases=${MNEME_RELEASES_URL:-https://github.com/notes-supply}
 issuer=https://token.actions.githubusercontent.com
-docs=https://github.com/notes-supply/mneme
+docs=https://github.com/notes-supply/mneme/blob/main/docs
 
 say() { printf '%s\n' "$*"; }
 fail() {
@@ -191,7 +191,7 @@ main() {
   if [ "$cosign" = yes ]; then
     say "Each binary matched its release's SHA256SUMS and its signature."
   else
-    say "Each binary matched its release's SHA256SUMS. cosign is not on PATH, so only the checksums were checked; to check the signatures too, see $docs#verify-a-download"
+    say "Each binary matched its release's SHA256SUMS. cosign is not on PATH, so only the checksums were checked; to check the signatures too, see $docs/install.md#verify-a-download"
   fi
   if [ "$replaced" = yes ]; then
     say "A service that was running the old version goes on with it until it restarts: systemctl --user try-restart mneme-autosave atrium"
@@ -208,7 +208,7 @@ main() {
   say "Next:"
   if has mneme; then
     say "  mneme init --remote https://github.com/YOU/wiki.git --token-file ~/.config/mneme/token"
-    say "    syncs ~/wiki with a repository; $docs#quick-start has the other remotes"
+    say "    syncs ~/wiki with a repository; $docs/configuration.md#remotes has the other remotes"
   fi
   if has atrium; then
     if [ "$unit" = yes ]; then

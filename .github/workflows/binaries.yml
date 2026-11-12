@@ -2,7 +2,7 @@ name: Binaries
 # On a version tag of a commit on main, builds a static mneme for x86_64 and aarch64 from the
 # Containerfile's build stage, so each binary is the one the image would hold, and attaches them
 # to a GitHub release with their checksums. Each is signed keyless as this file at that tag,
-# which is what `cosign verify-blob` in the README and install.sh check. It then tags the image
+# which is what `cosign verify-blob` in docs/install.md and install.sh check. It then tags the image
 # CI published for that commit with the version, and as latest.
 on:
   push:
@@ -133,7 +133,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           gh release create "$TAG" --verify-tag --title "Mneme $TAG" \
-            --notes "Static Linux binaries of Mneme $TAG. The README says how to verify and install them." \
+            --notes "Static Linux binaries of Mneme $TAG. docs/install.md says how to verify and install them." \
             mneme-x86_64-linux mneme-x86_64-linux.sigstore.json \
             mneme-aarch64-linux mneme-aarch64-linux.sigstore.json \
             SHA256SUMS

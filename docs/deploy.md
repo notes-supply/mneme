@@ -1,6 +1,19 @@
 # Deploy
 
-How the server's image is built and published, how a cluster running Flux can follow it, and how releases are made. The README says how to run a server by hand.
+How to run a Mneme server, how its image is built and published, how a cluster running Flux can follow it, and how releases are made.
+
+## Run a server
+
+```sh
+printf '{ "laptop": "%s" }\n' "$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)" > tokens.json
+mneme serve --repo /data/wiki.git --tokens tokens.json --addr 0.0.0.0:8080
+```
+
+The tokens file maps each machine's name to the SHA-256 of its token, and each machine runs `mneme init --server URL --token-file FILE` with its own token and that name. The server creates the repository when it is missing and installs its push check, which refuses what breaks the wiki's rules: a symlink, a submodule, a path named `.git`, a page over 1 MiB, a file over 10 MiB, or a deletion of `main`. Machines sync over `/git/wiki.git` with their tokens and report their state, which `/v1/machines` lists.
+
+It needs Git 2.45 or newer on `PATH`, with `git http-backend`, and refuses to start with an older one. It listens on `127.0.0.1:8080` unless `--addr` says otherwise, logs JSON lines on standard error, and stops on SIGTERM.
+
+`/v1`, the [reading API](api.md), has no login: whoever reaches it reads the whole wiki. Git over `/git/` needs a machine's token. So beyond the people who may read all of the wiki, expose only `/git/`. On a tailnet, `tailscale serve` in front of the server is enough to keep `/v1` to the tailnet.
 
 ## The image
 
@@ -35,7 +48,7 @@ Roll back a bad release with a revert commit on `main`; it deploys the same way.
 
 ## A release
 
-A tag `vX.Y.Z` on a commit on `main` runs `.github/workflows/binaries.yml`. It builds a static `mneme` for x86_64 and aarch64 in the `Containerfile`'s build stage, checks that each is static, built for its machine and of the tag's version, signs each keyless as that workflow at that tag, and attaches them to a GitHub release with `SHA256SUMS`. `install.sh` and the README's [Verify a download](../README.md#verify-a-download) check those signatures.
+A tag `vX.Y.Z` on a commit on `main` runs `.github/workflows/binaries.yml`. It builds a static `mneme` for x86_64 and aarch64 in the `Containerfile`'s build stage, checks that each is static, built for its machine and of the tag's version, signs each keyless as that workflow at that tag, and attaches them to a GitHub release with `SHA256SUMS`. `install.sh` and [Verify a download](install.md#verify-a-download) check those signatures.
 
 It then tags the image CI published for the tag's commit with the version, and as `latest` when the tag is the newest version. It fails, and says so, when that commit has no image, which happens when another commit reached `main` before its release job ran; tag a commit that has one. The signature is on the image's digest, so the new tags need none of their own. With `TAG` a commit or a version:
 

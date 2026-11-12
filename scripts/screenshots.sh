@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Makes the README's screenshots, docs/images/{terminal,changes}-{light,dark}.png, from a real
+# Makes the screenshots in docs/images/{terminal,changes}-{light,dark}.png from a real
 # run with invented content. Nothing in them is typed in by hand.
 #
 # Two machines, laptop and desktop, are containers of the server's image with those host names
