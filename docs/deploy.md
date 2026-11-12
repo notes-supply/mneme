@@ -50,7 +50,7 @@ Roll back a bad release with a revert commit on `main`; it deploys the same way.
 
 A tag `vX.Y.Z` on a commit on `main` runs `.github/workflows/binaries.yml`. It builds a static `mneme` for x86_64 and aarch64 in the `Containerfile`'s build stage, checks that each is static, built for its machine and of the tag's version, signs each keyless as that workflow at that tag, and attaches them to a GitHub release with `SHA256SUMS`. `install.sh` and [Verify a download](install.md#verify-a-download) check those signatures.
 
-It then tags the image CI published for the tag's commit with the version, and as `latest` when the tag is the newest version. It fails, and says so, when that commit has no image, which happens when another commit reached `main` before its release job ran; tag a commit that has one. The signature is on the image's digest, so the new tags need none of their own. With `TAG` a commit or a version:
+It then tags the image CI published for the tag's commit with the version, and a job of its own points `latest` at the newest version that has an image. The first fails, and says so, when that commit has no image, which happens when another commit reached `main` before its release job ran; tag a commit that has one. The signature is on the image's digest, so the new tags need none of their own. With `TAG` a commit or a version:
 
 ```sh
 cosign verify ghcr.io/notes-supply/mneme:TAG \

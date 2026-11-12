@@ -139,16 +139,14 @@ jobs:
             SHA256SUMS
 
   image:
-    name: tag the image
+    name: image
     needs: [publish]
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    # No concurrency group: a group keeps one pending run and cancels the others, which would
-    # skip a release. None is needed, since whether latest moves is read from the tags, not from
-    # the order runs finish in, and a newer tag's own run checks minutes later and moves it.
+    timeout-minutes: 5
     permissions:
-      contents: read # check out mise.toml and list the version tags
-      packages: write # add tags to the image
+      contents: read # read mise.toml for crane
+      packages: write # tag the image
+    # No concurrency group, so no release's version tag is ever cancelled.
     env:
       MISE_TASK_RUN_AUTO_INSTALL: "false"
       IMAGE: ghcr.io/notes-supply/mneme
@@ -163,24 +161,62 @@ jobs:
       # CI's release job pushed this commit's image as $IMAGE:<commit> and signed its digest.
       # A tag only names that digest, so the new tags need no new signature: cosign verify
       # finds the one release.yml made.
-      - name: Tag the commit's image with the version, and as latest when it is the newest
+      - name: Tag the commit's image with the version
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          printf '%s' "$GH_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          version=${GITHUB_REF_NAME#v}
+          if ! printf '%s\n' "$version" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "$GITHUB_REF_NAME is not vX.Y.Z, so the image gets no tags"
+            exit 0
+          fi
+          printf '%s' "$GITHUB_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           if ! digest=$(crane digest "$IMAGE:$GITHUB_SHA"); then
-            echo "There is no image $IMAGE:$GITHUB_SHA. CI's release job publishes one for a commit that is main's head when it runs; run this job again once it has, or tag a commit that has an image" >&2
+            echo "There is no image $IMAGE:$GITHUB_SHA. CI publishes one for a commit of main once its gate passed, if it is still main's head then. Rerun this job once it has, or tag a commit that has one." >&2
             exit 1
           fi
-          crane tag "$IMAGE@$digest" "${TAG#v}"
-          echo "$IMAGE:${TAG#v} is $IMAGE@$digest"
-          # A rerun of an older version's workflow must not move latest back.
-          newest=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
-            --jq '.[].ref | ltrimstr("refs/tags/")' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
-          if [ "$TAG" = "$newest" ]; then
-            crane tag "$IMAGE@$digest" latest
-            echo "$IMAGE:latest is $IMAGE@$digest"
-          else
-            echo "$newest is newer than $TAG, so latest stays where it is"
-          fi
+          crane tag "$IMAGE@$digest" "$version"
+          echo "$IMAGE@$digest is now $IMAGE:$version"
+
+  # Points latest at the newest version that has an image, whichever release ran this. The
+  # answer is the same for every run, so one run at a time is enough: a run the group cancels
+  # while it waits leaves the work to the run that replaced it, which gives the same answer.
+  latest:
+    name: latest
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # read mise.toml for crane, and list the version tags
+      packages: write # move the latest tag
+    concurrency:
+      group: image-latest
+      cancel-in-progress: false
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+      IMAGE: ghcr.io/notes-supply/mneme
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          install_args: aqua:google/go-containerregistry
+          cache: false
+      - name: Point latest at the newest version's image
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GITHUB_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          versions=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            --jq '.[].ref | ltrimstr("refs/tags/v")' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -rV)
+          for version in $versions; do
+            if digest=$(crane digest "$IMAGE:$version" 2>/dev/null); then
+              crane tag "$IMAGE@$digest" latest
+              echo "$IMAGE:latest is $IMAGE:$version, $IMAGE@$digest"
+              exit 0
+            fi
+            echo "$IMAGE:$version has no image yet"
+          done
+          echo "No version has an image yet, so latest stays where it is"
