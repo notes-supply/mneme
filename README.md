@@ -29,7 +29,7 @@ Install `mneme` and `atrium` on Linux, x86_64 or aarch64, with Git 2.45 or newer
 curl -fsSL https://raw.githubusercontent.com/notes-supply/mneme/main/install.sh | sh
 ```
 
-They go into `~/.local/bin`, which must be on your `PATH`; the installer says when it is not.
+They go into `~/.local/bin`. When that is not on your `PATH`, the installer prints the `export PATH=…` line to run in this shell and to add to `~/.profile`.
 
 Make an empty repository on your Git host, and give each machine a token that can write to it alone, in `~/.config/mneme/token`. Then, on each machine:
 
