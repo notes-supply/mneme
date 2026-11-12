@@ -1,5 +1,5 @@
 //! Machine tokens. The tokens file maps each machine's name to the SHA-256 of its token, in
-//! hexadecimal, as one JSON object: `{ "blackbox": "9f86d0…" }`.
+//! hexadecimal, as one JSON object: `{ "laptop": "9f86d0…" }`.
 
 use std::collections::BTreeMap;
 use std::path::Path;

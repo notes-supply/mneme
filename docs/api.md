@@ -2,6 +2,8 @@
 
 Every route is `GET`, lives under `/v1`, and answers with JSON. There is no authentication at this layer; the network keeps it private. The machines' reports, which `/v1/machines` lists, arrive on the Git routes with a machine's token, as described [at the end](#reports).
 
+`mneme serve --folder DIR` serves the same routes for a clone on the same machine, from `main` in `DIR/.git`, which it follows. It listens on a loopback address only, `127.0.0.1:8081` unless `--addr` says otherwise, and answers `421` with `{ "error" }` to any request whose `Host` is not `localhost`, `127.0.0.1` or `[::1]`, with any port. There `/v1/machines` is always empty, and there are no Git routes.
+
 Each route has one example response in `tests/fixtures/api/`. The tests check every real response against the shape of its example, both ways, so the frontend can test against the same files. To write them again from a real server, run `MNEME_WRITE_EXAMPLES=1 cargo nextest run every_route`.
 
 ## Conventions

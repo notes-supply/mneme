@@ -184,7 +184,8 @@ struct State {
 /// Every machine in the tokens file, by name.
 pub struct Machines {
     state: Mutex<State>,
-    file: PathBuf,
+    /// The state file, or `None` when there are no machines to keep.
+    file: Option<PathBuf>,
 }
 
 impl Machines {
@@ -214,7 +215,20 @@ impl Machines {
                 head: None,
                 changed: false,
             }),
-            file,
+            file: Some(file),
+        }
+    }
+
+    /// No machines and no state file, for a server that takes no Git requests.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            state: Mutex::new(State {
+                records: BTreeMap::new(),
+                head: None,
+                changed: false,
+            }),
+            file: None,
         }
     }
 
@@ -279,6 +293,9 @@ impl Machines {
     ///
     /// Fails when the file cannot be written. The change is then written on the next call.
     pub fn save(&self) -> Result<()> {
+        let Some(file) = &self.file else {
+            return Ok(());
+        };
         let json = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if !state.changed {
@@ -287,7 +304,7 @@ impl Machines {
             state.changed = false;
             serde_json::to_vec(&state.records)?
         };
-        write(&self.file, &json).inspect_err(|_| {
+        write(file, &json).inspect_err(|_| {
             self.state
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)

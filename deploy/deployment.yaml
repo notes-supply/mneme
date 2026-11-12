@@ -4,9 +4,6 @@ metadata:
   name: mneme
   labels:
     app.kubernetes.io/name: mneme
-  # Restarts Mneme when its tokens change, since it reads the tokens file at start.
-  annotations:
-    secrets.infisical.com/auto-reload: "true"
 spec:
   replicas: 1
   # One writer on a ReadWriteOnce volume: the old pod stops before the new one starts.

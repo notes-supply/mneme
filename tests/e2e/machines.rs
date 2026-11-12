@@ -70,8 +70,8 @@ fn every_machine_is_listed_with_its_last_git_request_and_report() {
         .iter()
         .map(|machine| machine["name"].clone())
         .collect();
-    assert_eq!(names, ["aeolus", "blackbox", "cassia"]);
-    let aeolus = machine(&server, "aeolus");
+    assert_eq!(names, ["desktop", "laptop", "tablet"]);
+    let desktop = machine(&server, "desktop");
     for key in [
         "seen",
         "reported",
@@ -81,17 +81,17 @@ fn every_machine_is_listed_with_its_last_git_request_and_report() {
         "skipped",
         "skipped_more",
     ] {
-        assert_eq!(aeolus[key], Value::Null, "{key}");
+        assert_eq!(desktop[key], Value::Null, "{key}");
     }
-    assert_eq!(aeolus["current"], false);
+    assert_eq!(desktop["current"], false);
 
     let before = now();
-    let work = clone_as(&server, "blackbox");
+    let work = clone_as(&server, "laptop");
     work.write("index.md", "# Home\n");
     work.commit("Start");
     let (ok, said) = work.push(&["origin", "main"]);
     assert!(ok, "{said}");
-    let seen = machine(&server, "blackbox")["seen"].as_i64().unwrap();
+    let seen = machine(&server, "laptop")["seen"].as_i64().unwrap();
     assert!((before..=now()).contains(&seen), "{seen}");
 
     let head = server_head(&server);
@@ -103,46 +103,46 @@ fn every_machine_is_listed_with_its_last_git_request_and_report() {
         "skipped_more": 2,
     })
     .to_string();
-    let reply = send(&server, Some(&bearer("blackbox")), &body);
+    let reply = send(&server, Some(&bearer("laptop")), &body);
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert!(
         reply.body.contains("git-upload-pack"),
         "the Git request is answered"
     );
-    let blackbox = machine(&server, "blackbox");
-    assert_eq!(blackbox["state"], "idle");
-    assert_eq!(blackbox["detail"], "");
-    assert_eq!(blackbox["head"], head.as_str());
+    let laptop = machine(&server, "laptop");
+    assert_eq!(laptop["state"], "idle");
+    assert_eq!(laptop["detail"], "");
+    assert_eq!(laptop["head"], head.as_str());
     assert_eq!(
-        blackbox["skipped"],
+        laptop["skipped"],
         json!([{ "path": "link.md", "reason": "a symlink" }])
     );
-    assert_eq!(blackbox["skipped_more"], 2);
-    assert_eq!(blackbox["current"], true);
-    assert!((before..=now()).contains(&blackbox["reported"].as_i64().unwrap()));
+    assert_eq!(laptop["skipped_more"], 2);
+    assert_eq!(laptop["current"], true);
+    assert!((before..=now()).contains(&laptop["reported"].as_i64().unwrap()));
 
-    let other = clone_as(&server, "aeolus");
-    other.write("index.md", "# Home\n\nFrom aeolus.\n");
+    let other = clone_as(&server, "desktop");
+    other.write("index.md", "# Home\n\nFrom desktop.\n");
     other.commit("Edit");
     let (ok, said) = other.push(&["origin", "main"]);
     assert!(ok, "{said}");
     assert_eq!(
-        machine(&server, "blackbox")["current"],
+        machine(&server, "laptop")["current"],
         false,
-        "the server moved past the head blackbox reported"
+        "the server moved past the head laptop reported"
     );
 
     let example = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/api/report.json"),
     )
     .unwrap();
-    let reply = send(&server, Some(&bearer("cassia")), &example);
+    let reply = send(&server, Some(&bearer("tablet")), &example);
     assert_eq!(reply.status, 200, "{}", reply.body);
-    let cassia = machine(&server, "cassia");
-    assert_eq!(cassia["state"], "blocked");
-    assert_eq!(cassia["detail"], "a merge is in progress");
+    let tablet = machine(&server, "tablet");
+    assert_eq!(tablet["state"], "blocked");
+    assert_eq!(tablet["detail"], "a merge is in progress");
     assert_eq!(
-        cassia["seen"],
+        tablet["seen"],
         Value::Null,
         "a request that carries a report is not a sync"
     );
@@ -172,10 +172,10 @@ fn a_report_needs_a_token_and_a_well_formed_header() {
     assert_eq!(unauthorized.body, "");
     assert_eq!(send(&server, Some("Bearer not-a-token"), &good).status, 401);
 
-    let blackbox = bearer("blackbox");
+    let laptop = bearer("laptop");
     for garbled in [
-        report_raw(&server, Some(&blackbox), "not base64!"),
-        send(&server, Some(&blackbox), "not json"),
+        report_raw(&server, Some(&laptop), "not base64!"),
+        send(&server, Some(&laptop), "not json"),
     ] {
         assert_eq!(garbled.status, 400, "{}", garbled.body);
         assert!(garbled.json()["error"].is_string());
@@ -209,21 +209,21 @@ fn a_report_needs_a_token_and_a_well_formed_header() {
             json!([{ "path": "x", "reason": "r", "why": 1 }]),
         ),
     ] {
-        let reply = send(&server, Some(&blackbox), &body);
+        let reply = send(&server, Some(&laptop), &body);
         assert_eq!(reply.status, 422, "{body}");
         assert!(reply.json()["error"].is_string(), "{body}");
     }
     let huge = report("idle", &"x".repeat(3 << 10), Value::Null, json!([]));
-    assert_eq!(send(&server, Some(&blackbox), &huge).status, 413);
-    let blackbox_now = machine(&server, "blackbox");
-    assert_eq!(blackbox_now["state"], Value::Null, "no bad report was kept");
+    assert_eq!(send(&server, Some(&laptop), &huge).status, 413);
+    let laptop_now = machine(&server, "laptop");
+    assert_eq!(laptop_now["state"], Value::Null, "no bad report was kept");
     assert_eq!(
-        blackbox_now["seen"],
+        laptop_now["seen"],
         Value::Null,
         "no refused request was a sync"
     );
-    assert_eq!(send(&server, Some(&blackbox), &good).status, 200);
-    let stored = machine(&server, "blackbox");
+    assert_eq!(send(&server, Some(&laptop), &good).status, 200);
+    let stored = machine(&server, "laptop");
     assert_eq!(stored["state"], "idle");
     assert_eq!(stored["head"], Value::Null);
 }
@@ -249,7 +249,7 @@ fn machine_state_survives_a_restart_and_stays_out_of_git() {
     assert_eq!(first[0]["loaded"], 0);
     assert!(first[0]["error"].is_string(), "no file yet: {first:?}");
 
-    let work = clone_as(&server, "blackbox");
+    let work = clone_as(&server, "laptop");
     work.write("index.md", "# Home\n");
     work.commit("Start");
     let (ok, said) = work.push(&["origin", "main"]);
@@ -263,9 +263,9 @@ fn machine_state_survives_a_restart_and_stays_out_of_git() {
         "skipped_more": 1,
     })
     .to_string();
-    assert_eq!(send(&server, Some(&bearer("blackbox")), &body).status, 200);
+    assert_eq!(send(&server, Some(&bearer("laptop")), &body).status, 200);
     let before = server.json("/v1/machines");
-    assert_eq!(machine(&server, "blackbox")["state"], "blocked");
+    assert_eq!(machine(&server, "laptop")["state"], "blocked");
 
     let file = state_file(&server);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -297,7 +297,7 @@ fn machine_state_survives_a_restart_and_stays_out_of_git() {
     let blob = blob.trim();
     let refs = git.ok(server.repo(), &["for-each-ref", "--format=%(refname)"]);
     assert_eq!(refs, "refs/heads/main\n", "the state is no ref");
-    let fresh = clone_as(&server, "aeolus");
+    let fresh = clone_as(&server, "desktop");
     for repo in [server.repo(), fresh.path()] {
         let found = git.git(repo, &["cat-file", "-e", blob]);
         assert!(!found.status.success(), "the state is no object");
@@ -314,16 +314,16 @@ fn an_unreadable_state_file_means_no_machine_seen() {
         "state": "idle", "detail": "", "head": null, "skipped": [], "skipped_more": 0,
     })
     .to_string();
-    assert_eq!(send(&server, Some(&bearer("blackbox")), &good).status, 200);
+    assert_eq!(send(&server, Some(&bearer("laptop")), &good).status, 200);
     let (_, _, server) = server.restart(&git);
-    assert_eq!(machine(&server, "blackbox")["state"], "idle");
+    assert_eq!(machine(&server, "laptop")["state"], "idle");
 
     fs::write(state_file(&server), "{ not json").unwrap();
     let (status, _, server) = server.restart(&git);
     assert!(status.success(), "{status}");
-    let blackbox = machine(&server, "blackbox");
-    assert_eq!(blackbox["state"], Value::Null);
-    assert_eq!(blackbox["reported"], Value::Null);
+    let laptop = machine(&server, "laptop");
+    assert_eq!(laptop["state"], Value::Null);
+    assert_eq!(laptop["reported"], Value::Null);
     let lines = loads(&server.log());
     assert_eq!(lines.len(), 1, "one line says why: {lines:?}");
     assert_eq!(lines[0]["loaded"], 0);
@@ -347,61 +347,61 @@ fn report_head(server: &Server, name: &str, head: &str) {
 fn a_machine_is_behind_from_when_its_head_first_differed() {
     let git = Isolation::new();
     let server = Server::empty(&git);
-    let work = clone_as(&server, "blackbox");
+    let work = clone_as(&server, "laptop");
     work.write("index.md", "# Home\n");
     work.commit("Start");
     let (ok, said) = work.push(&["origin", "main"]);
     assert!(ok, "{said}");
     let first = server_head(&server);
     assert_eq!(
-        behind_since(&server, "blackbox"),
+        behind_since(&server, "laptop"),
         Value::Null,
         "never reported"
     );
-    report_head(&server, "blackbox", &first);
+    report_head(&server, "laptop", &first);
     assert_eq!(
-        behind_since(&server, "blackbox"),
+        behind_since(&server, "laptop"),
         Value::Null,
         "the same head"
     );
-    assert_eq!(machine(&server, "blackbox")["current"], true);
+    assert_eq!(machine(&server, "laptop")["current"], true);
 
     let pushed = now();
-    let other = clone_as(&server, "aeolus");
-    other.write("index.md", "# Home\n\nFrom aeolus.\n");
+    let other = clone_as(&server, "desktop");
+    other.write("index.md", "# Home\n\nFrom desktop.\n");
     other.commit("Edit");
     let (ok, said) = other.push(&["origin", "main"]);
     assert!(ok, "{said}");
-    let since = behind_since(&server, "blackbox").as_i64().unwrap();
+    let since = behind_since(&server, "laptop").as_i64().unwrap();
     assert!(
         (pushed..=now()).contains(&since),
         "set by the push: {since}"
     );
-    assert_eq!(machine(&server, "blackbox")["current"], false);
+    assert_eq!(machine(&server, "laptop")["current"], false);
     assert_eq!(
-        behind_since(&server, "aeolus"),
+        behind_since(&server, "desktop"),
         Value::Null,
-        "aeolus never reported"
+        "desktop never reported"
     );
 
     thread::sleep(Duration::from_millis(1100));
-    report_head(&server, "blackbox", &first);
+    report_head(&server, "laptop", &first);
     assert_eq!(
-        behind_since(&server, "blackbox"),
+        behind_since(&server, "laptop"),
         since,
         "a report of the same old head keeps the first time"
     );
     let (_, _, server) = server.restart(&git);
     assert_eq!(
-        behind_since(&server, "blackbox"),
+        behind_since(&server, "laptop"),
         since,
         "kept across a restart"
     );
 
     let second = server_head(&server);
-    report_head(&server, "blackbox", &second);
+    report_head(&server, "laptop", &second);
     assert_eq!(
-        behind_since(&server, "blackbox"),
+        behind_since(&server, "laptop"),
         Value::Null,
         "cleared by a match"
     );
@@ -411,8 +411,8 @@ fn a_machine_is_behind_from_when_its_head_first_differed() {
     work.write("local.md", "# Not pushed\n");
     let local = work.commit("Not pushed yet");
     let reported = now();
-    report_head(&server, "blackbox", &local);
-    let ahead = behind_since(&server, "blackbox").as_i64().unwrap();
+    report_head(&server, "laptop", &local);
+    let ahead = behind_since(&server, "laptop").as_i64().unwrap();
     assert!(
         (reported..=now()).contains(&ahead),
         "a report of a head that is not the server's sets it: {ahead}"
@@ -420,7 +420,7 @@ fn a_machine_is_behind_from_when_its_head_first_differed() {
     let (ok, said) = work.push(&["origin", "main"]);
     assert!(ok, "{said}");
     assert_eq!(
-        behind_since(&server, "blackbox"),
+        behind_since(&server, "laptop"),
         Value::Null,
         "the push made the server's head the reported one"
     );

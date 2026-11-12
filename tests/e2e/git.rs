@@ -48,6 +48,11 @@ impl Isolation {
         Self { home }
     }
 
+    /// The `HOME` every command gets. `XDG_CONFIG_HOME` is its `xdg`.
+    pub fn home(&self) -> &Path {
+        self.home.path()
+    }
+
     pub fn apply<'a>(&self, command: &'a mut Command) -> &'a mut Command {
         let home = self.home.path();
         command

@@ -1,6 +1,6 @@
 name: Release
 # Called by CI on a push to main once the gate passed on that commit. This file's path on
-# refs/heads/main is the keyless signing identity that Flux on Apollo verifies.
+# refs/heads/main is the keyless signing identity that the cluster's Flux verifies.
 on:
   workflow_call:
 permissions: {}

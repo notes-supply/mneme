@@ -1,10 +1,13 @@
 mod api;
 mod autosave;
 mod cli;
+mod folder;
 mod git;
 mod history;
+mod init;
 mod kill;
 mod machines;
 mod push;
+mod remote;
 mod server;
 mod simulation;

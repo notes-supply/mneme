@@ -181,12 +181,12 @@ fn the_author_of_the_edit_that_lost_is_read_from_main() {
     let work = Work::new();
     work.write("p.md", "# P\n\none\n");
     work.commit("Start");
-    work.write("p.md", "# P\n\nfrom aeolus\n");
+    work.write("p.md", "# P\n\nfrom desktop\n");
     work.ok(&["add", "-A"]);
     work.ok(&[
         "commit",
         "-q",
-        "--author=aeolus <autosave@aeolus>",
+        "--author=desktop <autosave@desktop>",
         "-m",
         "Save p.md",
     ]);
@@ -196,7 +196,7 @@ fn the_author_of_the_edit_that_lost_is_read_from_main() {
     work.ok(&["checkout", "-q", "aside"]);
     let aside = work.commit("A commit only on a branch");
     work.ok(&["checkout", "-q", "main"]);
-    work.write("p.md", "# P\n\nfrom blackbox\n");
+    work.write("p.md", "# P\n\nfrom laptop\n");
     work.commit(&format!("Save p.md\n\nOverlap: {lost}"));
     work.write("p.md", "# P\n\nagain\n");
     work.commit(&format!("Save p.md\n\nOverlap: {aside}"));
@@ -211,7 +211,7 @@ fn the_author_of_the_edit_that_lost_is_read_from_main() {
         "a commit that is not on main has no author here"
     );
     assert_eq!(events[1]["overlap"], lost.as_str());
-    assert_eq!(events[1]["overlap_author"], "aeolus");
+    assert_eq!(events[1]["overlap_author"], "desktop");
     assert_eq!(events[1]["author"], "Writer");
     assert_eq!(events[2]["overlap_author"], Value::Null);
 }

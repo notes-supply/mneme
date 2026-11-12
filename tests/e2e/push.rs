@@ -68,11 +68,11 @@ fn clone_commit_push_and_read_the_change() {
         .filter(|line| line["event"] == "push")
         .collect();
     assert_eq!(pushes.len(), 2);
-    assert_eq!(pushes[1]["machine"], "blackbox");
+    assert_eq!(pushes[1]["machine"], "laptop");
     assert_eq!(pushes[1]["commits"], 1);
     assert!(
         log.iter()
-            .any(|line| line.contains(r#""machine":"blackbox""#)
+            .any(|line| line.contains(r#""machine":"laptop""#)
                 && line.contains("git-receive-pack"))
     );
     assert!(!log.join("\n").contains(TOKEN), "the token is never logged");

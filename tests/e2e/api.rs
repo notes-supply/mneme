@@ -557,7 +557,7 @@ fn every_route_answers_in_the_shape_of_its_example_file() {
     let reply = server.get_with(
         "/git/wiki.git/info/refs?service=git-upload-pack",
         &[
-            ("authorization", "Bearer test-token-of-cassia"),
+            ("authorization", "Bearer test-token-of-tablet"),
             ("mneme-report", &STANDARD.encode(behind.to_string())),
         ],
     );

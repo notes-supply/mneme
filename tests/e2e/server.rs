@@ -16,14 +16,14 @@ use tempfile::TempDir;
 
 use crate::git::{Isolation, Work};
 
-/// The token of the machine `blackbox`.
-pub const TOKEN: &str = "test-token-of-blackbox";
-pub const AUTHORIZATION: &str = "Authorization: Bearer test-token-of-blackbox";
+/// The token of the machine `laptop`.
+pub const TOKEN: &str = "test-token-of-laptop";
+pub const AUTHORIZATION: &str = "Authorization: Bearer test-token-of-laptop";
 /// Every machine the test servers know, with its token.
 pub const MACHINES: [(&str, &str); 3] = [
-    ("aeolus", "test-token-of-aeolus"),
-    ("blackbox", TOKEN),
-    ("cassia", "test-token-of-cassia"),
+    ("desktop", "test-token-of-desktop"),
+    ("laptop", TOKEN),
+    ("tablet", "test-token-of-tablet"),
 ];
 
 pub struct Server {
@@ -142,9 +142,25 @@ impl Server {
             .args(["serve", "--addr", "127.0.0.1:0", "--tokens"])
             .arg(&file)
             .arg("--repo")
-            .arg(&repo)
-            .stderr(Stdio::piped());
-        let mut child = git.apply(&mut command).spawn().unwrap();
+            .arg(&repo);
+        Self::launch(git.apply(&mut command), repo, dirs)
+    }
+
+    /// `mneme serve --folder` on a clone, on a free loopback port, with no `git` on `PATH`.
+    pub fn folder(folder: &Path, git: &Isolation, extra: &[&str]) -> Self {
+        let empty = TempDir::new().unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mneme"));
+        command
+            .args(["serve", "--addr", "127.0.0.1:0", "--folder"])
+            .arg(folder)
+            .args(extra);
+        git.apply(&mut command).env("PATH", empty.path());
+        Self::launch(&mut command, folder.join(".git"), vec![empty])
+    }
+
+    /// Starts `command` and waits until it says where it listens.
+    fn launch(command: &mut Command, repo: PathBuf, dirs: Vec<TempDir>) -> Self {
+        let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
         let stderr = BufReader::new(child.stderr.take().unwrap());
         let log = Arc::new(Mutex::new(Vec::new()));
         let (ready, listening) = mpsc::channel();
@@ -187,8 +203,27 @@ impl Server {
     /// One request on a connection of its own, which the server closes after the response.
     fn request(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Reply {
         let addr = self.url.trim_start_matches("http://");
+        let host = format!("Host: {addr}\r\n");
+        self.request_as(&host, method, path, headers, body)
+    }
+
+    /// A `GET` that names `host` in its `Host` header, or sends none when it is `None`.
+    pub fn get_as(&self, host: Option<&str>, path: &str) -> Reply {
+        let host = host.map(|host| format!("Host: {host}\r\n"));
+        self.request_as(host.as_deref().unwrap_or_default(), "GET", path, &[], b"")
+    }
+
+    fn request_as(
+        &self,
+        host: &str,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Reply {
+        let addr = self.url.trim_start_matches("http://");
         let mut head = format!(
-            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+            "{method} {path} HTTP/1.1\r\n{host}Connection: close\r\n\
              Content-Length: {}\r\n",
             body.len()
         );
