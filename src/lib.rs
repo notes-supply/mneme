@@ -1,4 +1,6 @@
-//! Mneme holds the wiki's Git repository, serves it over HTTPS and answers read requests.
+//! Mneme keeps a Markdown wiki in Git: an autosave service commits, syncs and pushes each
+//! writer's folder, and an optional server holds the repository, checks every push and answers
+//! read requests.
 
 use std::fmt::Write as _;
 use std::process::ExitCode;
@@ -35,7 +37,8 @@ enum Command {
     /// Take this machine from nothing to syncing: make the wiki folder ready, then install the
     /// autosave service as a systemd user unit and start it.
     Init(init::Args),
-    /// Serve the repository over HTTPS and the reading API.
+    /// Serve the wiki's repository over HTTPS and the reading API, or with --folder only the
+    /// reading API of a clone on this machine.
     Serve(serve::Args),
     /// Save, sync and push a wiki folder, so that writers only edit files.
     Autosave {

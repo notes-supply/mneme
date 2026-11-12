@@ -28,6 +28,14 @@ Choices made while building Mneme that the design brief left open or that differ
 - **A path finds the page whose last event at that path is newest,** among pages that are not deleted. Two pages never hold one path at the same time, so that page is the one that had it most recently. A live page at the path is always that page. Deleted pages are left out before choosing, so a page that moved away is found even when a later page at the path was deleted.
 - **docs/api.md links its examples** in `tests/fixtures/api/` instead of copying them, so the documented responses are the tested ones.
 
+## Reading a folder
+
+- **`mneme serve --folder DIR` is the reading API of a clone on the same machine,** with the same index and the same `/v1` routes, read from `refs/heads/main` in `DIR/.git`. `--folder` conflicts with `--repo` and `--tokens`. There are no Git routes, no hook, no tokens and no machine state, so `/v1/machines` is empty, and it never runs `git`, so it skips the version check. A test runs it with an empty `PATH` and compares every file under the folder, `.git` included, before and after.
+- **Loopback only, since the reading API has no login.** The address must be a loopback one, an IPv4-mapped one included, and is `127.0.0.1:8081` by default. Every request must name `localhost`, `127.0.0.1` or `[::1]`, with any port, in `Host`, and in the request target when that is absolute. Any other name, or none, is `421` with `{ "error" }`, `/healthz` included. That keeps a web page that points a name of its own at `127.0.0.1` from reading the wiki through the browser.
+- **The index follows `main` by reading its tip every 2 seconds.** One ref is cheap to read, and a file watcher would have to follow packed refs and lock files. New commits are added as after a push. A tip that does not descend from the indexed head along first parents, as after a hand reset, has the index built again from scratch outside the lock and swapped in, so reads go on meanwhile. A failure is logged once until it changes, and the old index keeps answering.
+- **`--exit-with-parent`,** hidden from help, records the parent's process id at start and checks it every second. When it changes, the server stops as on SIGTERM, so a child of Atrium never outlives it, even after a SIGKILL.
+- **`mneme serve --repo` now listens on `127.0.0.1:8080` by default,** where it was `0.0.0.0:8080`, so a server started by hand is not on the network until told to be. The image passes `--addr 0.0.0.0:8080` and is unchanged.
+
 ## Git over HTTPS
 
 - **The tokens file is one JSON object** of machine name to hexadecimal SHA-256.

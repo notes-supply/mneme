@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use gix::ObjectId;
 use gix::bstr::BStr;
 use gix::diff::Rewrites;
@@ -11,6 +11,11 @@ use gix::objs::tree::EntryMode;
 
 /// The branch that holds the wiki. The push check keeps every other ref out.
 pub const MAIN: &str = "refs/heads/main";
+
+/// A commit that `main` no longer holds, as when someone reset `main` by hand.
+#[derive(Debug, thiserror::Error)]
+#[error("commit {0} is not on {MAIN}")]
+pub struct NotOnMain(pub ObjectId);
 
 /// One commit of `main` and the pages it changed.
 #[derive(Debug)]
@@ -84,7 +89,7 @@ impl Repo {
     ///
     /// # Errors
     ///
-    /// Fails when an object cannot be read, or when `after` is not on `main`.
+    /// Fails when an object cannot be read, or with [`NotOnMain`] when `after` is not on `main`.
     pub fn commits_after(&self, after: Option<ObjectId>) -> Result<Vec<Commit>> {
         let repo = &self.repo;
         let mut ids = Vec::new();
@@ -100,11 +105,8 @@ impl Repo {
                 .next()
                 .map(gix::Id::detach);
         }
-        if after.is_some() && next.is_none() {
-            bail!(
-                "commit {} is not on {MAIN}",
-                after.unwrap_or(ObjectId::null(repo.object_hash()))
-            );
+        if let (Some(after), None) = (after, next) {
+            return Err(NotOnMain(after).into());
         }
         ids.iter().rev().map(|&id| commit(repo, id)).collect()
     }
