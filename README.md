@@ -56,3 +56,9 @@ mise run gate
 ```
 
 The gate checks formatting, runs clippy with warnings denied, runs the tests with nextest, checks the RustSec advisories, and lints the CI workflow. Its tests include a simulation of three clones and a server over 128 seeds. `mise run soak` runs 2000. CI runs the same command. Set `MISE_OFFLINE=1` to check the advisories against the local copy of the database without fetching it.
+
+## License
+
+Licensed under either of the [Apache License, Version 2.0](LICENSE-APACHE) or the [MIT license](LICENSE-MIT), at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in Mneme by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
