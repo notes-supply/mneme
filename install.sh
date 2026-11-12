@@ -21,6 +21,7 @@ set -eu
 releases=${MNEME_RELEASES_URL:-https://github.com/notes-supply}
 issuer=https://token.actions.githubusercontent.com
 docs=https://github.com/notes-supply/mneme/blob/main/docs
+script=https://raw.githubusercontent.com/notes-supply/mneme/main/install.sh
 
 say() { printf '%s\n' "$*"; }
 fail() {
@@ -87,7 +88,7 @@ download() {
     fi
   fi
 
-  if [ "$app" = atrium ]; then
+  if [ "$app" = atrium ] && [ "$systemd" = yes ] && [ ! -e "$units/atrium.service" ]; then
     fetch -o "$work/atrium/atrium.service" "$releases/atrium/raw/$tag/contrib/atrium.service" \
       || fail "could not download Atrium's unit at $tag"
   fi
@@ -105,27 +106,28 @@ place() {
   staged=
 }
 
-# Installs Atrium's user unit when atrium went into ~/.local/bin, which the unit runs, and
-# systemctl --user works, unless a unit is there already. Sets unit to yes when there is one.
+# Installs Atrium's user unit, unless one is there already, and loads it when the user manager
+# answers, which it may not over SSH or on a headless machine. Sets unit to yes when there is a
+# unit, and reload to yes when it is not loaded yet.
 install_unit() {
-  unit=no
-  [ "$dir" = "$default_dir" ] || return 0
-  command -v systemctl >/dev/null 2>&1 || return 0
-  systemctl --user show-environment >/dev/null 2>&1 || return 0
-  case ${XDG_CONFIG_HOME:-} in
-    /*) units=$XDG_CONFIG_HOME/systemd/user ;;
-    *) units=$HOME/.config/systemd/user ;;
-  esac
   unit=yes
   if [ -e "$units/atrium.service" ]; then
     say "$units/atrium.service is already there, and was left as it is."
     return 0
   fi
+  if [ ! -f "$work/atrium/atrium.service" ]; then
+    unit=no
+    return 0
+  fi
   mkdir -p "$units"
   cp "$work/atrium/atrium.service" "$units/.atrium.service.new.$$"
   mv "$units/.atrium.service.new.$$" "$units/atrium.service"
-  systemctl --user daemon-reload
-  say "Installed $units/atrium.service, not enabled."
+  if systemctl --user show-environment >/dev/null 2>&1 && systemctl --user daemon-reload; then
+    say "Installed $units/atrium.service, not enabled."
+  else
+    reload=yes
+    say "Installed $units/atrium.service, not enabled. systemd's user manager did not answer, so run systemctl --user daemon-reload before enabling it."
+  fi
 }
 
 # Says when git is missing or older than 2.45, which the autosave service needs.
@@ -169,6 +171,17 @@ main() {
   done
   default_dir=${HOME:?HOME is not set}/.local/bin
   dir=${MNEME_INSTALL_DIR:-$default_dir}
+  # Atrium's unit runs %h/.local/bin/atrium and %h/.local/bin/mneme, so it goes in only beside
+  # binaries in that folder, on a machine with systemd.
+  case ${XDG_CONFIG_HOME:-} in
+    /*) units=$XDG_CONFIG_HOME/systemd/user ;;
+    *) units=$HOME/.config/systemd/user ;;
+  esac
+  if [ "$dir" = "$default_dir" ] && command -v systemctl >/dev/null 2>&1; then
+    systemd=yes
+  else
+    systemd=no
+  fi
   detect
   if command -v cosign >/dev/null 2>&1; then cosign=yes; else cosign=no; fi
 
@@ -197,7 +210,8 @@ main() {
     say "A service that was running the old version goes on with it until it restarts: systemctl --user try-restart mneme-autosave atrium"
   fi
   unit=no
-  if has atrium; then install_unit; fi
+  reload=no
+  if has atrium && [ "$systemd" = yes ]; then install_unit; fi
   case ":$PATH:" in
     *":$dir:"*) ;;
     *) say "$dir is not on PATH. Add it, for example in ~/.profile: export PATH=\"$dir:\$PATH\"" ;;
@@ -211,12 +225,22 @@ main() {
     say "    syncs ~/wiki with a repository; $docs/configuration.md#remotes has the other remotes"
   fi
   if has atrium; then
-    if [ "$unit" = yes ]; then
-      say "  systemctl --user enable --now atrium"
+    if [ ! -e "$dir/mneme" ]; then
+      if [ "$dir" = "$default_dir" ]; then
+        say "  curl -fsSL $script | sh -s -- mneme"
+      else
+        say "  curl -fsSL $script | MNEME_INSTALL_DIR=$dir sh -s -- mneme"
+      fi
+      say "    installs Mneme first, which Atrium runs to read the wiki"
     else
-      say "  atrium --wiki-folder ~/wiki"
+      if [ "$unit" = yes ]; then
+        if [ "$reload" = yes ]; then say "  systemctl --user daemon-reload"; fi
+        say "  systemctl --user enable --now atrium"
+      else
+        say "  atrium --wiki-folder ~/wiki"
+      fi
+      say "    serves the wiki at http://localhost:8080"
     fi
-    say "    serves the wiki at http://localhost:8080"
   fi
 }
 

@@ -154,6 +154,26 @@ impl Machine {
         log
     }
 
+    /// A `systemctl` that records its arguments and finds no user manager, as over SSH.
+    fn without_user_manager(&self) {
+        executable(
+            &self.root.path().join("bin/systemctl"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 1\n",
+                self.root.path().join("systemctl.log").display()
+            ),
+        );
+    }
+
+    /// Atrium's unit as the release serves it.
+    fn served_unit(&self) -> PathBuf {
+        self.root
+            .path()
+            .join("releases/atrium/raw")
+            .join(TAG)
+            .join("contrib/atrium.service")
+    }
+
     /// What `systemctl` was asked, one run per line.
     fn systemctl(&self) -> String {
         fs::read_to_string(self.root.path().join("systemctl.log")).unwrap_or_default()
@@ -348,6 +368,46 @@ fn one_app_for_arm64_goes_into_the_named_folder_and_its_signature_is_checked() {
     assert!(!refused.status.success(), "{refused:?}");
     assert!(stderr(&refused).contains("is not signed by"), "{refused:?}");
     assert!(!dir.join("atrium").exists());
+
+    fs::remove_file(machine.served_unit()).unwrap();
+    machine.cosign(0);
+    let atrium = machine.install(&["atrium"], &[("MNEME_INSTALL_DIR", &dir)]);
+    assert!(
+        atrium.status.success(),
+        "a folder of its own needs no unit, so a missing one is not fetched: {atrium:?}"
+    );
+    assert!(dir.join("atrium").exists());
+    assert!(
+        stdout(&atrium).contains("  atrium --wiki-folder ~/wiki\n"),
+        "{atrium:?}"
+    );
+    assert_eq!(machine.systemctl(), "");
+}
+
+#[test]
+fn atrium_alone_without_a_user_manager_gets_its_unit_and_is_told_to_install_mneme_first() {
+    let machine = Machine::new("x86_64");
+    machine.without_user_manager();
+    let output = machine.install(&["atrium"], &[]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        machine.unit().exists(),
+        "the unit is installed without a user manager"
+    );
+    assert_eq!(
+        machine.systemctl(),
+        "--user show-environment\n",
+        "and is not loaded"
+    );
+    let said = stdout(&output);
+    for line in [
+        "systemd's user manager did not answer, so run systemctl --user daemon-reload before enabling it",
+        "| sh -s -- mneme\n",
+        "installs Mneme first, which Atrium runs to read the wiki",
+    ] {
+        assert!(said.contains(line), "{line}: {said}");
+    }
+    assert!(!said.contains("enable --now"), "{said}");
 }
 
 #[test]
