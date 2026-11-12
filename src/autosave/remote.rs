@@ -85,6 +85,8 @@ impl Transport {
 impl Remote {
     /// A Git remote by `url`, checked against how it logs in. A local path is made absolute,
     /// since Git runs in the folder and a path relative to elsewhere would not be found there.
+    /// A URL's scheme is made lower case, since Git looks for a remote helper named as written,
+    /// such as `git-remote-HTTPS` for `HTTPS://`.
     ///
     /// # Errors
     ///
@@ -113,7 +115,10 @@ impl Remote {
                 .with_context(|| format!("the remote's path {} is not UTF-8", absolute.display()))?
                 .to_owned()
         } else {
-            url.to_owned()
+            match url.split_once("://") {
+                Some((scheme, rest)) => format!("{}://{rest}", scheme.to_ascii_lowercase()),
+                None => url.to_owned(),
+            }
         };
         Ok(Self::Git { url, login })
     }
@@ -392,6 +397,30 @@ mod tests {
             let remote = Remote::git(given, Login::default()).unwrap();
             assert_eq!(remote.origin(), given);
         }
+    }
+
+    #[test]
+    fn a_urls_scheme_is_made_lower_case_and_the_rest_stays_as_given() {
+        for (given, origin) in [
+            (
+                "HTTPS://Example.com/Team/Wiki.git",
+                "https://Example.com/Team/Wiki.git",
+            ),
+            (
+                "Http://LocalHost:8080/wiki.git",
+                "http://LocalHost:8080/wiki.git",
+            ),
+            ("FILE:///srv/Wiki.git", "file:///srv/Wiki.git"),
+        ] {
+            let remote = Remote::git(given, Login::default()).unwrap();
+            assert_eq!(remote.origin(), origin, "{given}");
+        }
+        let remote = Remote::git("HTTPS://example.com/wiki.git", token()).unwrap();
+        assert_eq!(
+            login(&remote)[0].0,
+            "http.https://example.com/wiki.git.extraHeader",
+            "the token is scoped to the URL Git is given"
+        );
     }
 
     #[test]
