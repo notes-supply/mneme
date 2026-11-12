@@ -145,3 +145,74 @@ fn autosave_refuses_to_start_with_a_git_older_than_2_45() {
         }
     }
 }
+
+/// `mneme autosave init` with `args` after the folder, a missing one under `dir`.
+fn autosave_init(dir: &Path, args: &[&str]) -> Output {
+    fs::write(dir.join("token"), "a-token\n").unwrap();
+    Command::new(env!("CARGO_BIN_EXE_mneme"))
+        .current_dir(dir)
+        .args(["autosave", "init", "--folder"])
+        .arg(dir.join("wiki"))
+        .args(args)
+        .args(["--name", "x"])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn autosave_takes_a_server_or_a_remote_and_only_the_login_that_fits_it() {
+    for (args, code, said) in [
+        (&["--token-file", "token"][..], 2, "--server"),
+        (
+            &[
+                "--server",
+                "http://127.0.0.1:9",
+                "--remote",
+                "/srv/wiki.git",
+                "--token-file",
+                "token",
+            ][..],
+            2,
+            "cannot be used with",
+        ),
+        (&["--server", "http://127.0.0.1:9"][..], 2, "--token-file"),
+        (
+            &[
+                "--server",
+                "http://127.0.0.1:9",
+                "--token-file",
+                "token",
+                "--ssh-key",
+                "token",
+            ][..],
+            2,
+            "cannot be used with",
+        ),
+        (
+            &["--remote", "ssh://host/wiki.git", "--token-file", "token"][..],
+            1,
+            "--token-file is for an HTTPS remote",
+        ),
+        (
+            &["--remote", "https://host/wiki.git", "--ssh-key", "token"][..],
+            1,
+            "--ssh-key is for an SSH remote",
+        ),
+        (
+            &["--remote", "https://me:secret@host/wiki.git"][..],
+            1,
+            "holds a password",
+        ),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let output = autosave_init(dir.path(), args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(code), "{args:?}: {stderr}");
+        assert!(stderr.contains(said), "{args:?}: {stderr}");
+        assert!(!stderr.contains("secret"), "{args:?}: {stderr}");
+        assert!(
+            !dir.path().join("wiki").exists(),
+            "{args:?}: nothing was made"
+        );
+    }
+}

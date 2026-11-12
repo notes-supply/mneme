@@ -1,21 +1,22 @@
 //! The gate for the autosave service: three clones, each with its own service, against one real
-//! server. The test drives every tick with a fake clock, in an order a seeded generator picks,
-//! and between ticks does what writers do. `MNEME_SIM_SEEDS` sets how many seeds run,
+//! server, and again against a bare repository with no push check, as any Git host holds one.
+//! The test drives every tick with a fake clock, in an order a seeded generator picks, and
+//! between ticks does what writers do. `MNEME_SIM_SEEDS` sets how many seeds run,
 //! `MNEME_SIM_SEED` runs one seed, and `MNEME_SIM_STEPS` sets the steps per seed.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::panic::{self, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mneme::autosave::{Autosave, Config, Outcome, Token};
-use mneme::rules::{MAX_FILE, MAX_PAGE};
+use mneme::autosave::{Autosave, Config, Login, Outcome, Remote, Settings, Token};
+use mneme::rules::{self, Entry, MAX_FILE, MAX_PAGE};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -29,6 +30,8 @@ const STALE_LOCK: Duration = Duration::from_secs(300);
 const START: u64 = 1_800_000_000;
 /// Port 9 is discard, which nothing on the test machine listens on.
 const UNREACHABLE: &str = "http://127.0.0.1:9/git/wiki.git";
+/// A bare remote that is not there, as when its disk or host is gone.
+const UNREACHABLE_BARE: &str = "/nonexistent/mneme-simulation/wiki.git";
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const GATE_SEEDS: u64 = 128;
 /// The body of a hand commit made to land as a service moves the folder.
@@ -45,6 +48,70 @@ fn env_number<T: std::str::FromStr>(name: &str) -> Option<T> {
 
 #[test]
 fn three_clones_end_equal_to_the_server_with_every_commit_once() {
+    simulate(Kind::Server);
+}
+
+/// The same against a plain bare repository, which takes any push. The service's own rules must
+/// keep every file it leaves out off the remote, since nothing there would refuse one.
+#[test]
+fn three_clones_end_equal_to_a_bare_remote_with_every_commit_once() {
+    simulate(Kind::Bare);
+}
+
+/// What the clones sync with.
+#[derive(Clone, Copy)]
+enum Kind {
+    /// A Mneme server, with its push check and the services' reports.
+    Server,
+    /// A bare repository by its path, with neither.
+    Bare,
+}
+
+/// A Mneme server, or a bare repository that only stores what it is sent.
+enum Upstream {
+    Server(Server),
+    Bare(TempDir),
+}
+
+impl Upstream {
+    fn new(kind: Kind, git: &Isolation) -> Self {
+        match kind {
+            Kind::Server => Self::Server(Server::empty(git)),
+            Kind::Bare => {
+                let dir = TempDir::new().unwrap();
+                let repo = dir.path().join("wiki.git");
+                git.ok(
+                    dir.path(),
+                    &["init", "-q", "--bare", "-b", "main", repo.to_str().unwrap()],
+                );
+                Self::Bare(dir)
+            }
+        }
+    }
+
+    fn repo(&self) -> PathBuf {
+        match self {
+            Self::Server(server) => server.repo().to_owned(),
+            Self::Bare(dir) => dir.path().join("wiki.git"),
+        }
+    }
+
+    fn git_url(&self) -> String {
+        match self {
+            Self::Server(server) => server.git_url(),
+            Self::Bare(_) => self.repo().to_str().unwrap().to_owned(),
+        }
+    }
+
+    fn unreachable(&self) -> &'static str {
+        match self {
+            Self::Server(_) => UNREACHABLE,
+            Self::Bare(_) => UNREACHABLE_BARE,
+        }
+    }
+}
+
+fn simulate(kind: Kind) {
     let steps = env_number("MNEME_SIM_STEPS").unwrap_or(GATE_STEPS);
     let seeds: Vec<u64> = match env_number("MNEME_SIM_SEED") {
         Some(seed) => vec![seed],
@@ -63,7 +130,7 @@ fn three_clones_end_equal_to_the_server_with_every_commit_once() {
                         return;
                     }
                     let seed = seeds[index];
-                    let mut sim = Sim::new(seed);
+                    let mut sim = Sim::new(seed, kind);
                     let run = panic::catch_unwind(AssertUnwindSafe(|| sim.run(steps)));
                     tally.lock().unwrap().add(&sim.tally);
                     if let Err(cause) = run {
@@ -283,7 +350,7 @@ impl Commit {
 struct Sim {
     seed: u64,
     rng: fastrand::Rng,
-    server: Server,
+    server: Upstream,
     git: Isolation,
     /// The Git program the service of one clone runs, which can make a hand commit land as it
     /// moves the folder. Running it costs a shell for every Git command, so only that clone has
@@ -303,9 +370,9 @@ struct Sim {
 }
 
 impl Sim {
-    fn new(seed: u64) -> Self {
+    fn new(seed: u64, kind: Kind) -> Self {
         let git = Isolation::new();
-        let server = Server::empty(&git);
+        let server = Upstream::new(kind, &git);
         let now = UNIX_EPOCH + Duration::from_secs(START);
         let racy = TempDir::new().unwrap();
         let program = git::racy_git(racy.path());
@@ -372,21 +439,34 @@ impl Sim {
         let url = self.server.git_url();
         git.ok(dir.path(), &["-c", &header, "clone", "-q", &url, "."]);
         git.ok(dir.path(), &["config", "gc.auto", "0"]);
-        let service = Autosave::new(Config {
-            folder: dir.path().to_owned(),
-            server: self.server.url.clone(),
-            token: Token(token.to_owned()),
-            machine: machine.to_owned(),
-            quiet: QUIET,
-            fetch_every: FETCH_EVERY,
-            report_every: Duration::from_secs(300),
-            stale_lock: STALE_LOCK,
-            git: if racing {
-                self.racy.1.clone()
-            } else {
-                "git".into()
-            },
-        });
+        let program = if racing {
+            self.racy.1.clone()
+        } else {
+            "git".into()
+        };
+        let service = match &self.server {
+            Upstream::Server(server) => Autosave::new(Config {
+                folder: dir.path().to_owned(),
+                server: server.url.clone(),
+                token: Token(token.to_owned()),
+                machine: machine.to_owned(),
+                quiet: QUIET,
+                fetch_every: FETCH_EVERY,
+                report_every: Duration::from_secs(300),
+                stale_lock: STALE_LOCK,
+                git: program,
+            }),
+            Upstream::Bare(_) => Autosave::new(Settings {
+                folder: dir.path().to_owned(),
+                remote: Remote::git(&url, Login::default()).unwrap(),
+                machine: machine.to_owned(),
+                quiet: QUIET,
+                fetch_every: FETCH_EVERY,
+                report_every: Duration::from_secs(300),
+                stale_lock: STALE_LOCK,
+                git: program,
+            }),
+        };
         let mut clone = Clone {
             machine,
             token,
@@ -948,7 +1028,7 @@ impl Sim {
         let url = if online {
             self.server.git_url()
         } else {
-            UNREACHABLE.to_owned()
+            self.server.unreachable().to_owned()
         };
         self.clones[clone].ok(&["config", "remote.origin.url", &url]);
         self.clones[clone].online = online;
@@ -959,24 +1039,24 @@ impl Sim {
     /// replays on top of what it saved.
     fn saved_head(&self) -> (String, Commit) {
         let mut head = self.server_head();
-        let mut commit = Commit::read(&self.git, self.server.repo(), &head);
+        let mut commit = Commit::read(&self.git, &self.server.repo(), &head);
         while commit.message.contains(LANDED_AS_IT_MOVED) {
             head.clone_from(&commit.parents[0]);
-            commit = Commit::read(&self.git, self.server.repo(), &head);
+            commit = Commit::read(&self.git, &self.server.repo(), &head);
         }
         (head, commit)
     }
 
     fn server_head(&self) -> String {
         self.git
-            .ok(self.server.repo(), &["rev-parse", "main"])
+            .ok(&self.server.repo(), &["rev-parse", "main"])
             .trim()
             .to_owned()
     }
 
     fn server_text(&self, commit: &str, path: &str) -> Option<Vec<u8>> {
         let output = self.git.git(
-            self.server.repo(),
+            &self.server.repo(),
             &["cat-file", "blob", &format!("{commit}:{path}")],
         );
         output.status.success().then_some(output.stdout)
@@ -1025,11 +1105,30 @@ impl Sim {
                 clone.machine
             );
         }
-        let merges = self
-            .git
-            .ok(self.server.repo(), &["rev-list", "--min-parents=2", "main"]);
+        let merges = self.git.ok(
+            &self.server.repo(),
+            &["rev-list", "--min-parents=2", "main"],
+        );
         assert_eq!(merges, "", "seed {seed}: the server's history is one line");
-        let machines = self.server.json("/v1/machines");
+        match &self.server {
+            Upstream::Server(server) => self.check_reports(server),
+            Upstream::Bare(_) => self.check_rules_kept(),
+        }
+        let stuck: Vec<_> = self
+            .outcomes
+            .iter()
+            .filter(|(_, outcome)| matches!(outcome, Outcome::Blocked(_) | Outcome::Stopped(_)))
+            .collect();
+        assert!(
+            stuck.is_empty(),
+            "seed {seed}: no tick was blocked or stopped: {stuck:?}"
+        );
+    }
+
+    /// Each clone's report lists the files its service leaves in the folder.
+    fn check_reports(&self, server: &Server) {
+        let seed = self.seed;
+        let machines = server.json("/v1/machines");
         for clone in &self.clones {
             let reported = machines["machines"]
                 .as_array()
@@ -1049,22 +1148,41 @@ impl Sim {
                 clone.machine
             );
         }
-        let stuck: Vec<_> = self
-            .outcomes
-            .iter()
-            .filter(|(_, outcome)| matches!(outcome, Outcome::Blocked(_) | Outcome::Stopped(_)))
-            .collect();
-        assert!(
-            stuck.is_empty(),
-            "seed {seed}: no tick was blocked or stopped: {stuck:?}"
-        );
+    }
+
+    /// Every commit on a remote with no push check keeps the rules the server's check would
+    /// hold it to, so a file the services leave out never got there.
+    fn check_rules_kept(&self) {
+        let seed = self.seed;
+        let repo = self.server.repo();
+        let range = format!("{}..main", self.base);
+        for commit in self.git.ok(&repo, &["rev-list", &range]).lines() {
+            let listing = self
+                .git
+                .ok(&repo, &["ls-tree", "-r", "-t", "-z", "-l", commit]);
+            for record in listing.split('\0').filter(|record| !record.is_empty()) {
+                let (facts, path) = record.split_once('\t').unwrap();
+                let facts: Vec<&str> = facts.split_whitespace().collect();
+                let entry = match (facts[0], facts[1]) {
+                    ("120000", _) => Entry::Symlink,
+                    ("160000", _) => Entry::Repository,
+                    (_, "tree") => Entry::Folder,
+                    _ => Entry::File(facts[3].parse().unwrap()),
+                };
+                assert_eq!(
+                    rules::check(path.as_bytes(), entry),
+                    None,
+                    "seed {seed}: commit {commit} on the bare remote holds {path}"
+                );
+            }
+        }
     }
 
     /// Returns how many replays overlapped, how many merged cleanly, and how many commits were
     /// left out because their change was already there.
     fn check_every_commit_once(&self) -> (usize, usize, usize) {
         let seed = self.seed;
-        let repo = self.server.repo();
+        let repo = &self.server.repo();
         let range = format!("{}..main", self.base);
         let on_server = Commit::read_all(&self.git, repo, &["--reverse", &range]);
         let base_tree = self
@@ -1173,7 +1291,7 @@ impl Sim {
             );
             let range = format!("{}..main", self.base);
             let deletions = self.git.ok(
-                self.server.repo(),
+                &self.server.repo(),
                 &[
                     "log",
                     "--diff-filter=D",

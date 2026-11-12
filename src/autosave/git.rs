@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
-use super::Config;
+use super::Settings;
 
 /// The id Git reads as no object at all.
 pub(super) const NO_OBJECT: &str = "0000000000000000000000000000000000000000";
@@ -41,13 +41,14 @@ pub(super) struct Git {
     folder: PathBuf,
     /// The repository inside the folder, `.git`.
     repository: PathBuf,
-    /// The server's base URL, which every setting for it is scoped to.
-    server: String,
-    /// The server's Git repository.
+    /// A Mneme server's base URL, which every setting for it is scoped to, or `None` for a
+    /// remote that is not a server.
+    server: Option<String>,
+    /// The remote's Git repository, as `origin` names it.
     url: String,
     /// Variables every command gets.
     env: Vec<(OsString, OsString)>,
-    /// Configuration every command gets through `GIT_CONFIG_*`. The token is among it, never
+    /// Configuration every command gets through `GIT_CONFIG_*`. A token is among it, never
     /// on a command line.
     settings: Vec<(String, String)>,
     /// The tick's time, as Git reads a date.
@@ -55,14 +56,12 @@ pub(super) struct Git {
 }
 
 impl Git {
-    pub fn new(config: &Config) -> Self {
+    /// Git for the service of `config`, logged in to its remote.
+    pub fn new(config: &Settings) -> Self {
         let folder = config.folder.clone();
         let repository = folder.join(".git");
-        let settings = [
-            (
-                format!("http.{}.extraHeader", config.server),
-                format!("Authorization: Bearer {}", config.token.0),
-            ),
+        let mut settings = config.remote.login_settings();
+        settings.extend([
             ("credential.helper".to_owned(), String::new()),
             ("commit.gpgSign".to_owned(), "false".to_owned()),
             ("core.excludesFile".to_owned(), "/dev/null".to_owned()),
@@ -70,7 +69,7 @@ impl Git {
             ("core.fsmonitor".to_owned(), "false".to_owned()),
             ("gc.autoDetach".to_owned(), "false".to_owned()),
             ("maintenance.autoDetach".to_owned(), "false".to_owned()),
-        ];
+        ]);
         let mut env: Vec<(OsString, OsString)> = vec![
             ("GIT_DIR".into(), repository.clone().into()),
             ("GIT_WORK_TREE".into(), folder.clone().into()),
@@ -90,19 +89,23 @@ impl Git {
             ]
             .map(|(key, value)| (key.into(), value.into())),
         );
+        let server = match &config.remote {
+            super::Remote::Server { url, .. } => Some(url.clone()),
+            super::Remote::Git { .. } => None,
+        };
         Self {
             program: config.git.clone(),
             folder,
             repository,
-            server: config.server.clone(),
-            url: format!("{}/git/wiki.git", config.server),
+            server,
+            url: config.remote.origin(),
             env,
-            settings: settings.into(),
+            settings,
             date: String::new(),
         }
     }
 
-    /// The server's Git repository, as `origin` should name it.
+    /// The remote's Git repository, as `origin` should name it.
     pub fn url(&self) -> &str {
         &self.url
     }
@@ -152,7 +155,7 @@ impl Git {
         command
     }
 
-    /// Clones the server's repository into the folder, which must be missing or empty.
+    /// Clones the remote's repository into the folder, which must be missing or empty.
     pub fn clone_server(&self) -> Result<Run> {
         let mut command = self.command(&[]);
         command
@@ -166,11 +169,11 @@ impl Git {
     /// Asks the server for its `main` with `header` on every request. It needs no repository,
     /// so it works when the folder is not one.
     pub fn ask_server_with(&self, header: &str) -> Result<Run> {
+        let Some(server) = &self.server else {
+            bail!("only a Mneme server takes a header of the service's own");
+        };
         let extra = [
-            (
-                format!("http.{}.extraHeader", self.server),
-                header.to_owned(),
-            ),
+            (format!("http.{server}.extraHeader"), header.to_owned()),
             ("protocol.version".to_owned(), "0".to_owned()),
         ];
         let mut command = self.command(&extra);

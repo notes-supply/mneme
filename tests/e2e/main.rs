@@ -6,5 +6,6 @@ mod history;
 mod kill;
 mod machines;
 mod push;
+mod remote;
 mod server;
 mod simulation;

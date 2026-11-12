@@ -108,7 +108,7 @@ Every edit the simulation writes carries a token used once, and every page it cr
 
 Five kinds of overlap are also made on purpose, on a page both clones hold as the server has it: the same line changed, the same new page created, an edit against a delete either way round, and one page renamed two ways. Both clones save before either syncs, and the simulation checks at once that the second clone's tick pushes and that the server's head has one `Overlap` trailer and that clone's side: its text, its delete, or its name.
 
-The gate runs 128 seeds of 80 steps, about a minute here. `mise run soak` runs 2000 seeds and the kill test over 20 seeds.
+The gate runs 128 seeds of 80 steps against the server, about a minute and a half here, and the same against a bare repository, under a minute. `mise run soak` runs 2000 seeds of each and the kill test over 20 seeds.
 
 ### A stale `index.lock`
 
@@ -120,6 +120,16 @@ A Git command killed with SIGKILL, by a power cut or by killing the whole unit, 
 - **The one remaining risk:** a command that holds the lock for more than five minutes without writing to it loses its index update, and its work tree is untouched.
 
 The simulation leaves such a lock, half the time with half an index, and the kill test leaves one while a service is down. Both require that no tick is ever blocked.
+
+### Any Git remote
+
+- **`--remote URL` is the other choice to `--server URL`, and `run` and `init` take exactly one.** `origin` is the URL as given, except that a local path is made absolute, since Git runs in the folder. Git's own rules decide how a URL is reached: `scheme://`, a remote helper's `name::`, then a colon before any slash for SSH's short form `user@host:path`, and a path otherwise.
+- **SSH is the user's own `ssh`, as `core.sshCommand` set to `ssh -o BatchMode=yes`,** so keys, the agent, `~/.ssh/config` and Tailscale SSH work as they do in a terminal, and nothing waits for a passphrase or a yes. `--ssh-key` adds `-i FILE -o IdentitiesOnly=yes`, with the path made absolute and quoted for the shell Git runs the command with. Only `init` adds `-o StrictHostKeyChecking=accept-new`, so that its first clone can learn the host's key. `run` says nothing about host keys, so with `BatchMode` it refuses a host it does not know, unless the user's own ssh configuration says otherwise. Options on the command line win over `~/.ssh/config`, and the rest of it applies. Inside the systemd unit the home folder is read-only, so ssh cannot write `known_hosts` or a control socket there; `init` runs outside the unit and learns the key first.
+- **An HTTPS token is HTTP Basic authentication:** `Authorization: Basic base64(user:token)`, with the URL's user name, percent-decoded, or `git` when it has none, as `http.<url>.extraHeader` through `GIT_CONFIG_*` like the server's token. Git sends it only to that URL, it is in no file, no argument and no log, and a wrong token fails at once since Git may not prompt. Git hosts take a token as the password, and some want the user name the token belongs to, which the URL then carries. A URL that holds a password is refused, since it would be in `origin`, the unit and the log.
+- **A login that does not fit the remote is refused before anything changes:** a key for anything but SSH, a token for anything but HTTPS.
+- **A remote that is not a server takes no report.** The service logs a `skipped` line instead whenever the files it leaves out change, since there is no `/v1/machines` to list them. Everything else is the server's code path: save, fetch, replay, overlap, push, refusals and offline handling. A plain remote has no push check. The service's saves never stage a file the rules refuse, but a person's hand commit that holds one is pushed, where a server would refuse it.
+- **The folder is made absolute for `--remote` and left as given for `--server`,** which keeps the server's path exactly as it was. A relative folder other than `.` cannot work there: Git runs in the folder with `GIT_DIR` relative to the start.
+- **The simulation runs against a bare repository too,** with the same seeds and the same oracle, and checks every commit on the remote against the rules instead of the reports. SSH is tested with an `ssh` on `PATH` that records its arguments and runs the remote command locally, and HTTPS against `git http-backend` behind a small test server that refuses any other `Authorization`.
 
 ## Deployment
 

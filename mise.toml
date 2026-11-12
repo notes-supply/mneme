@@ -42,7 +42,7 @@ description = "Lint the CI workflow"
 run = ["actionlint", "zizmor --offline .github/workflows"]
 
 [tasks.soak]
-description = "Run the autosave simulation over 2000 seeds and the kill test over 20"
+description = "Run the autosave simulations over 2000 seeds and the kill test over 20"
 run = [
   "MNEME_SIM_SEEDS=2000 cargo nextest run --locked --no-capture -E 'test(three_clones)'",
   "for seed in $(seq 1 20); do MNEME_KILL_SEED=$seed cargo nextest run --locked -E 'test(services_killed)' || exit 1; done",

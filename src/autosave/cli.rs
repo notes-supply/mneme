@@ -10,24 +10,50 @@ use serde_json::json;
 use tokio::signal::unix::{SignalKind, signal};
 
 use super::git::Git;
-use super::{Autosave, Config, Outcome, Token};
+use super::{Autosave, Login, Outcome, Remote, Settings, Token};
 use crate::{git_version, log};
 
-/// Which folder, which server, and who this machine is.
+/// Which folder, which remote, and who this machine is.
 #[derive(Debug, clap::Args)]
 pub struct Target {
     /// The wiki folder.
     #[arg(long)]
     pub folder: PathBuf,
-    /// The server's base URL, such as `https://mneme.example`.
-    #[arg(long)]
-    pub server: String,
-    /// A file that holds this machine's token and nothing else.
-    #[arg(long)]
-    pub token_file: PathBuf,
-    /// This machine's name in the server's tokens file.
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    /// This machine's name: in the server's tokens file, and on every autosave commit.
     #[arg(long)]
     pub name: String,
+}
+
+/// Where the folder syncs, and how the service logs in.
+#[derive(Debug, clap::Args)]
+pub struct RemoteArgs {
+    #[command(flatten)]
+    pub to: To,
+    /// A file that holds this machine's token and nothing else. A server needs one. An HTTPS
+    /// remote may take one, which is sent as the password of HTTP Basic authentication with the
+    /// URL's user name, or `git` when it has none.
+    #[arg(long, required_unless_present = "remote")]
+    pub token_file: Option<PathBuf>,
+    /// An SSH key that ssh uses alone for the remote, such as a deploy key of this machine's
+    /// own. Without it, ssh logs in as it does in a terminal.
+    #[arg(long, conflicts_with = "server")]
+    pub ssh_key: Option<PathBuf>,
+}
+
+/// A Mneme server or any Git remote, and never both.
+#[derive(Debug, clap::Args)]
+#[group(required = true, multiple = false)]
+pub struct To {
+    /// A Mneme server's base URL, such as `https://mneme.example`. It checks every push and
+    /// lists each machine's state.
+    #[arg(long)]
+    pub server: Option<String>,
+    /// Any Git remote, as `origin` will name it: `ssh://host/~/wiki.git`,
+    /// `git@host:wiki.git`, `https://host/wiki.git`, or a path.
+    #[arg(long)]
+    pub remote: Option<String>,
 }
 
 /// The service's timing. The defaults suit a person or an agent writing pages.
@@ -84,20 +110,16 @@ pub fn main(command: Command) -> Result<()> {
 }
 
 impl Target {
-    fn config(&self, run: Option<&Run>) -> Result<Config> {
-        let token = fs::read_to_string(&self.token_file)
-            .with_context(|| format!("reading the token file {}", self.token_file.display()))?;
-        let token = token.trim();
-        if token.is_empty() {
-            bail!("the token file {} is empty", self.token_file.display());
-        }
+    /// The settings of `run`, or of `init` when `run` is `None`. Only `init` lets ssh learn a
+    /// new host key.
+    fn config(&self, run: Option<&Run>) -> Result<Settings> {
+        let remote = self.remote.remote(run.is_none())?;
         let timing = |pick: fn(&Run) -> Duration, default: u64| {
             run.map_or(Duration::from_secs(default), pick)
         };
-        Ok(Config {
-            folder: self.folder.clone(),
-            server: self.server.trim_end_matches('/').to_owned(),
-            token: Token(token.to_owned()),
+        Ok(Settings {
+            folder: service_folder(&self.folder, &remote)?,
+            remote,
             machine: self.name.clone(),
             quiet: timing(|run| run.quiet_seconds, 15),
             fetch_every: timing(|run| run.fetch_seconds, 30),
@@ -106,6 +128,63 @@ impl Target {
             git: PathBuf::from("git"),
         })
     }
+}
+
+impl RemoteArgs {
+    /// The remote, with what it logs in with. `learn_host_key` lets ssh accept the key of a
+    /// host it has never seen, which only a first clone needs.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the token file or the key cannot be read, or they do not fit the remote.
+    pub fn remote(&self, learn_host_key: bool) -> Result<Remote> {
+        let token = self.token_file.as_deref().map(read_token).transpose()?;
+        match (&self.to.server, &self.to.remote) {
+            (Some(server), _) => Ok(Remote::Server {
+                url: server.trim_end_matches('/').to_owned(),
+                token: token.context("a server needs --token-file")?,
+            }),
+            (None, Some(url)) => {
+                let ssh_key = self.ssh_key.as_deref().map(key_file).transpose()?;
+                Remote::git(
+                    url,
+                    Login {
+                        ssh_key,
+                        accept_new_host_key: learn_host_key,
+                        token,
+                    },
+                )
+            }
+            (None, None) => bail!("name a --server or a --remote"),
+        }
+    }
+}
+
+/// The folder as the service gets it. For a remote that is not a server it is made absolute,
+/// since Git runs in the folder and finds `.git` from there.
+fn service_folder(folder: &Path, remote: &Remote) -> Result<PathBuf> {
+    if remote.is_server() {
+        return Ok(folder.to_owned());
+    }
+    std::path::absolute(folder).with_context(|| format!("finding {}", folder.display()))
+}
+
+/// The token in `file`, which holds it and nothing else.
+fn read_token(file: &Path) -> Result<Token> {
+    let token = fs::read_to_string(file)
+        .with_context(|| format!("reading the token file {}", file.display()))?;
+    let token = token.trim();
+    if token.is_empty() {
+        bail!("the token file {} is empty", file.display());
+    }
+    Ok(Token(token.to_owned()))
+}
+
+/// The key at `file`, as an absolute path, once it is known to be readable. ssh runs in the
+/// folder, so a relative path would not find it.
+fn key_file(file: &Path) -> Result<PathBuf> {
+    File::open(file).with_context(|| format!("reading the key file {}", file.display()))?;
+    std::path::absolute(file).with_context(|| format!("finding {}", file.display()))
 }
 
 /// Takes the folder for this service alone, until the returned file is closed when the service
@@ -142,14 +221,19 @@ fn serve(run: &Run) -> Result<()> {
     git_version::check(&config.git, "mneme autosave")?;
     let _held = hold(&config.folder)?;
     let pause = run.tick_seconds;
-    log::emit(
-        "started",
-        json!({
+    let started = match &config.remote {
+        Remote::Server { url, .. } => json!({
             "folder": config.folder,
-            "server": config.server,
+            "server": url,
             "machine": config.machine,
         }),
-    );
+        Remote::Git { url, .. } => json!({
+            "folder": config.folder,
+            "remote": url,
+            "machine": config.machine,
+        }),
+    };
+    log::emit("started", started);
     let mut service = Autosave::new(config);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -180,9 +264,13 @@ fn serve(run: &Run) -> Result<()> {
 fn init(target: &Target) -> Result<()> {
     let config = target.config(None)?;
     git_version::check(&config.git, "mneme autosave")?;
-    let git = Git::new(&config);
+    ready(&Git::new(&config))
+}
+
+/// Clones into a missing or empty folder, or checks an existing clone.
+fn ready(git: &Git) -> Result<()> {
     let url = git.url();
-    let path = &config.folder;
+    let path = git.folder();
     let empty = match fs::read_dir(path) {
         Ok(mut entries) => entries.next().is_none(),
         Err(error) if error.kind() == ErrorKind::NotFound => true,

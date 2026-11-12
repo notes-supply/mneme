@@ -5,6 +5,7 @@
 mod cli;
 mod folder;
 mod git;
+mod remote;
 mod replay;
 mod save;
 
@@ -19,9 +20,10 @@ use serde_json::json;
 
 use crate::log;
 use crate::machines::{MAX_REPORT, MAX_SKIPPED, REPORT_HEADER, Report, Skipped};
-pub use cli::{Command, main};
+pub use cli::{Command, RemoteArgs, To, main};
 use folder::{Folder, Leave};
 use git::Git;
+pub use remote::{Login, Remote, Transport};
 use replay::Local;
 use save::{Left, Save};
 
@@ -43,7 +45,30 @@ impl fmt::Debug for Token {
     }
 }
 
-/// What one service works on, and how often.
+/// What one service works on, where it syncs, and how often.
+#[derive(Clone, Debug)]
+pub struct Settings {
+    /// The wiki folder, a clone of the remote's repository.
+    pub folder: PathBuf,
+    pub remote: Remote,
+    /// The machine's name, as in a server's tokens file. Autosave commits carry it.
+    pub machine: String,
+    /// How long every changed file must have been still before a save.
+    pub quiet: Duration,
+    /// How often to fetch when nothing else asks for it.
+    pub fetch_every: Duration,
+    /// How often to report the state to a server when it has not changed.
+    pub report_every: Duration,
+    /// How long `index.lock` may sit unchanged before it counts as a dead command's. A live
+    /// command that holds it keeps writing it, and none in a wiki folder writes the index for
+    /// minutes.
+    pub stale_lock: Duration,
+    /// The Git program, `git` on `PATH` unless a test puts a wrapper in its place.
+    pub git: PathBuf,
+}
+
+/// What one service works on, and how often, when it syncs with a Mneme server. It is
+/// [`Settings`] with [`Remote::Server`], as `--server` gives it.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// The wiki folder, a clone of the server's repository.
@@ -59,12 +84,28 @@ pub struct Config {
     pub fetch_every: Duration,
     /// How often to report the state when it has not changed.
     pub report_every: Duration,
-    /// How long `index.lock` may sit unchanged before it counts as a dead command's. A live
-    /// command that holds it keeps writing it, and none in a wiki folder writes the index for
-    /// minutes.
+    /// How long `index.lock` may sit unchanged before it counts as a dead command's.
     pub stale_lock: Duration,
     /// The Git program, `git` on `PATH` unless a test puts a wrapper in its place.
     pub git: PathBuf,
+}
+
+impl From<Config> for Settings {
+    fn from(config: Config) -> Self {
+        Self {
+            folder: config.folder,
+            remote: Remote::Server {
+                url: config.server,
+                token: config.token,
+            },
+            machine: config.machine,
+            quiet: config.quiet,
+            fetch_every: config.fetch_every,
+            report_every: config.report_every,
+            stale_lock: config.stale_lock,
+            git: config.git,
+        }
+    }
 }
 
 /// What a tick did, or why it did nothing.
@@ -137,6 +178,8 @@ struct State {
     unstorable: HashSet<Vec<u8>>,
     /// The last report the server took, and when.
     reported: Option<(Report, SystemTime)>,
+    /// What the log last said the service leaves out, for a remote that takes no reports.
+    logged_skipped: Vec<Skipped>,
 }
 
 /// How local history stands against the server's.
@@ -151,6 +194,8 @@ enum Shape {
 /// What a tick saw of the folder, for its report.
 #[derive(Default)]
 struct Seen {
+    /// Whether the tick read the folder, which a guard can stop it from doing.
+    looked: bool,
     /// The folder's head, or `None` when a guard stopped the tick before reading it.
     head: Option<String>,
     /// What the service leaves in the folder, by path.
@@ -180,7 +225,7 @@ enum Push {
 
 /// One service and the little it remembers between ticks.
 pub struct Autosave {
-    config: Config,
+    config: Settings,
     git: Git,
     state: State,
 }
@@ -188,7 +233,8 @@ pub struct Autosave {
 impl Autosave {
     /// A service that has not ticked yet.
     #[must_use]
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: impl Into<Settings>) -> Self {
+        let config = config.into();
         Self {
             git: Git::new(&config),
             config,
@@ -223,6 +269,7 @@ impl Autosave {
         };
         if let Some(reason) = reason {
             let seen = Seen {
+                looked: true,
                 head: folder.head,
                 left,
             };
@@ -298,7 +345,12 @@ impl Autosave {
         };
         left.sort_by(|a, b| a.path.cmp(&b.path));
         left.dedup_by(|a, b| a.path == b.path);
-        Ok((outcome, Seen { head, left }))
+        let seen = Seen {
+            looked: true,
+            head,
+            left,
+        };
+        Ok((outcome, seen))
     }
 
     /// Why the folder must not be touched now, from what Git leaves in `.git`. An
@@ -722,8 +774,13 @@ impl Autosave {
     /// Tells the server the state when it changed, and at least once per interval. A report
     /// that does not arrive is sent again on the next tick. It goes as a header on a Git
     /// request, so it reaches the server exactly as syncing does, through the same proxy and
-    /// certificates.
+    /// certificates. A remote that is not a server takes no report, so the log says instead
+    /// which files the service leaves out, whenever that changes.
     fn report(&mut self, now: SystemTime, outcome: &Outcome, seen: Seen) {
+        if !self.config.remote.is_server() {
+            self.log_skipped(seen);
+            return;
+        }
         let mut detail = outcome.detail().to_owned();
         if detail.len() > MAX_DETAIL {
             let cut = (0..=MAX_DETAIL)
@@ -763,6 +820,24 @@ impl Autosave {
                 .is_ok_and(|run| run.success)
         {
             self.state.reported = Some((report, now));
+        }
+    }
+
+    fn log_skipped(&mut self, seen: Seen) {
+        if !seen.looked {
+            return;
+        }
+        let skipped: Vec<Skipped> = seen
+            .left
+            .into_iter()
+            .map(|left| Skipped {
+                path: String::from_utf8_lossy(&left.path).into_owned(),
+                reason: left.leave.to_string(),
+            })
+            .collect();
+        if skipped != self.state.logged_skipped {
+            log::emit("skipped", json!({ "skipped": skipped }));
+            self.state.logged_skipped = skipped;
         }
     }
 }
