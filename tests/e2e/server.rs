@@ -166,13 +166,17 @@ impl Server {
         let (ready, listening) = mpsc::channel();
         let lines = Arc::clone(&log);
         let reader = thread::spawn(move || {
+            // Each line goes into the log before it says the server is ready, so that whoever
+            // waited for that finds the listening line in the log.
             for line in stderr.lines().map_while(Result::ok) {
-                if let Ok(event) = serde_json::from_str::<Value>(&line)
-                    && event["event"] == "listening"
-                {
-                    let _ = ready.send(event["addr"].as_str().unwrap().to_owned());
-                }
+                let addr = serde_json::from_str::<Value>(&line)
+                    .ok()
+                    .filter(|event| event["event"] == "listening")
+                    .and_then(|event| event["addr"].as_str().map(str::to_owned));
                 lines.lock().unwrap().push(line);
+                if let Some(addr) = addr {
+                    let _ = ready.send(addr);
+                }
             }
         });
         let addr = listening
