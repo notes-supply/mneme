@@ -101,10 +101,11 @@ impl Report {
         if self.detail.len() > MAX_DETAIL {
             return Some("detail is too long");
         }
-        let commit = |head: &String| {
-            head.len() == 40 && head.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        };
-        if self.head.as_ref().is_some_and(|head| !commit(head)) {
+        if self
+            .head
+            .as_deref()
+            .is_some_and(|head| !crate::full_commit_id(head))
+        {
             return Some("head is not a full commit id");
         }
         if self.skipped.len() > MAX_SKIPPED {

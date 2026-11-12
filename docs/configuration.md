@@ -19,6 +19,7 @@ Every machine that writes the wiki runs the autosave service on its own folder, 
 | `--name NAME` | This machine's name, on every commit it makes and in a server's tokens file. The short host name by default. |
 | `--no-service` | Make the folder ready and print the command that runs the service, instead of installing a unit. |
 | `--force` | Replace an installed unit that differs. |
+| `--follow` | Set up a machine that only keeps a copy: its service never stages, commits or pushes ([The service](#the-service)). |
 
 ## Remotes
 
@@ -76,6 +77,8 @@ mneme autosave run --folder ~/wiki --server https://mneme.example --token-file ~
 
 A folder takes one service: a second `run` on it exits. The service logs JSON lines on standard error and stops on SIGTERM.
 
+A machine that only keeps a copy, such as a mirror or a backup, runs the service with `--follow`, which `mneme init --follow` writes into the unit and `mneme autosave init` takes too. It never stages, commits or pushes, so a read-only token is enough: one that the server's tokens file gives `"access": "read"`, or a Git host's token that may only read the repository. Each tick it fetches on the usual schedule and moves the folder to the remote's `main` with the same two-way move as a writer's service, and reports `pulled`, `idle` or `offline`. An edit or a file in the folder that is in the way of the move makes the tick `blocked` and names the path, and so do commits on `main` that the remote does not have. Edits that are not in the way stay in the folder, unsaved. `mneme init --follow` takes no folder of files, since it would never push them.
+
 ## How autosave behaves
 
 - A change is saved once every changed file has been still for 15 seconds, then pushed. The service fetches right after, and every 30 seconds.
@@ -92,7 +95,9 @@ A plain remote stores what it is sent. It has no push check, so a commit made by
 | Option | |
 |---|---|
 | `--repo DIR` | The wiki's bare repository, created when it is missing. A server: Git over `/git/wiki.git`, the push check, machine state and the reading API. |
-| `--tokens FILE` | With `--repo`: a JSON object that maps each machine's name to the SHA-256 of its token. |
+| `--tokens FILE` | With `--repo`: a JSON object that maps each machine's name to the SHA-256 of its token, or to `{ "sha256", "access" }` with `access` `read` or `write` ([deploy.md](deploy.md#run-a-server)). |
+| `--tokens-env NAME` | Instead of `--tokens`: the same JSON from the environment variable `NAME`. |
+| `--private-api` | With `--repo`: every `/v1` route asks for a token from the tokens file, read-only or not. |
 | `--folder DIR` | Instead of `--repo`: only the reading API of a clone on this machine, on loopback. |
 | `--addr ADDR` | Where to listen. `127.0.0.1:8080` with `--repo`, `127.0.0.1:8081` with `--folder`. |
 

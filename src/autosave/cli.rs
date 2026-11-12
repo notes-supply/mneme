@@ -24,6 +24,10 @@ pub struct Target {
     /// This machine's name: in the server's tokens file, and on every autosave commit.
     #[arg(long)]
     pub name: String,
+    /// Only keep a copy of the remote's main: fetch and take its changes, and never stage,
+    /// commit or push. A read-only token is enough.
+    #[arg(long)]
+    pub follow: bool,
 }
 
 /// Where the folder syncs, and how the service logs in.
@@ -121,6 +125,7 @@ impl Target {
             report_every: timing(|run| run.report_seconds, 300),
             stale_lock: timing(|run| run.stale_lock, 300),
             git: PathBuf::from("git"),
+            follow: self.follow,
         })
     }
 }
@@ -204,11 +209,13 @@ fn serve(run: &Run) -> Result<()> {
             "folder": config.folder,
             "server": url,
             "machine": config.machine,
+            "follow": config.follow,
         }),
         Remote::Git { url, .. } => json!({
             "folder": config.folder,
             "remote": url,
             "machine": config.machine,
+            "follow": config.follow,
         }),
     };
     log::emit("started", started);
@@ -265,7 +272,8 @@ fn init(target: &Target) -> Result<()> {
 
 /// Makes the folder ready for the service of `config`, as `mneme autosave init` does, and also
 /// takes a folder of files that is not a repository yet when the remote has no `main`, for
-/// `mneme init`, which says what it did in a sentence of its own.
+/// `mneme init`, which says what it did in a sentence of its own. A service that follows takes
+/// no such folder, since it would never push the files.
 ///
 /// # Errors
 ///
@@ -273,7 +281,7 @@ fn init(target: &Target) -> Result<()> {
 /// overwriting a file.
 pub(crate) fn prepare(config: &Settings) -> Result<Ready> {
     git_version::check(&config.git, "mneme init")?;
-    ready(&Git::new(config), true)
+    ready(&Git::new(config), !config.follow)
 }
 
 /// Clones into a missing or empty folder, or checks an existing clone. With `adopt`, a folder

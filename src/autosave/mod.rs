@@ -1,6 +1,8 @@
 //! `mneme autosave`: makes a wiki folder behave like a note app with autosave. Writers only
 //! edit files. The service commits, fetches, replays and pushes, one tick at a time, and keeps
-//! nothing but the repository and what this module remembers between ticks.
+//! nothing but the repository and what this module remembers between ticks. A service that
+//! follows only keeps a copy: it fetches and moves the folder to the server's `main`, and never
+//! stages, commits or pushes.
 
 mod cli;
 mod folder;
@@ -35,6 +37,9 @@ const MAX_DETAIL: usize = 1000;
 const MOVES: usize = 4;
 /// What the reflog of `main` says of a move.
 const MOVE_MESSAGE: &str = "autosave: move to the server's main";
+/// Why a service that follows waits, when `main` has commits the server does not.
+const LOCAL_COMMITS: &str =
+    "the folder follows the server and has local commits, which the service never pushes";
 
 /// A machine's token. Its `Debug` leaves the token out.
 #[derive(Clone)]
@@ -66,6 +71,8 @@ pub struct Settings {
     pub stale_lock: Duration,
     /// The Git program, `git` on `PATH` unless a test puts a wrapper in its place.
     pub git: PathBuf,
+    /// Only keep a copy of the remote's `main`: never stage, commit or push.
+    pub follow: bool,
 }
 
 /// What one service works on, and how often, when it syncs with a Mneme server. It is
@@ -105,6 +112,7 @@ impl From<Config> for Settings {
             report_every: config.report_every,
             stale_lock: config.stale_lock,
             git: config.git,
+            follow: false,
         }
     }
 }
@@ -258,17 +266,15 @@ impl Autosave {
         if let Some(reason) = self.blocked(now)? {
             return Ok((Outcome::Blocked(reason), Seen::default()));
         }
+        if self.config.follow {
+            return self.follow(now);
+        }
         let mut folder = Folder::read(&self.git)?;
         let unstorable = &mut self.state.unstorable;
         unstorable.retain(|name| folder.changes.iter().any(|changed| changed.path == *name));
         folder.leave_unstorable(unstorable);
         let mut left = save::left(&folder);
-        let reason = match folder.branch.as_deref() {
-            Some("main") => None,
-            Some(other) => Some(format!("HEAD is on {other}, not main")),
-            None => Some("HEAD is detached, not on main".to_owned()),
-        };
-        if let Some(reason) = reason {
+        if let Some(reason) = off_main(&folder) {
             let seen = Seen {
                 looked: true,
                 head: folder.head,
@@ -276,15 +282,7 @@ impl Autosave {
             };
             return Ok((Outcome::Blocked(reason), seen));
         }
-        if folder.head.is_some()
-            && folder.head == self.state.last_head
-            && self.state.refreshed != folder.head
-        {
-            let run = self.git.run(&["update-index", "-q", "--refresh"])?;
-            if run.success {
-                self.state.refreshed.clone_from(&folder.head);
-            }
-        }
+        self.refresh_when_held(&folder)?;
         let mut head = folder.head.clone();
         let mut progress = Progress::Idle;
         let mut stopped = None;
@@ -352,6 +350,113 @@ impl Autosave {
             left,
         };
         Ok((outcome, seen))
+    }
+
+    /// One tick of a service that only keeps a copy. It fetches as a writer's does and moves the
+    /// folder to the server's `main` with the same two-way move, every tick, so that it moves
+    /// as soon as nothing is in the way. It never stages, commits or pushes, and is blocked when
+    /// a change in the folder is in the way of the move or `main` has commits the server does
+    /// not.
+    fn follow(&mut self, now: SystemTime) -> Result<(Outcome, Seen)> {
+        let folder = Folder::read(&self.git)?;
+        let mut seen = Seen {
+            looked: true,
+            head: folder.head.clone(),
+            left: Vec::new(),
+        };
+        if let Some(reason) = off_main(&folder) {
+            return Ok((Outcome::Blocked(reason), seen));
+        }
+        self.refresh_when_held(&folder)?;
+        let head = folder.head.clone();
+        if self.fetch_due(now, head.as_ref()) {
+            self.fetch(now, head.clone())?;
+        }
+        let origin = self.origin()?;
+        let mut pulled = false;
+        let blocked = match (self.shape(head.as_deref(), origin.as_deref())?, origin) {
+            (Shape::Same, _) | (Shape::Behind, None) => None,
+            (Shape::Behind, Some(origin)) => match self.take(head.as_deref(), &origin)? {
+                Ok(()) => {
+                    pulled = true;
+                    if let Some((_, at)) = &mut self.state.fetched {
+                        *at = Some(origin.clone());
+                    }
+                    seen.head = Some(origin);
+                    None
+                }
+                Err(reason) => Some(reason),
+            },
+            (Shape::Ahead | Shape::Diverged(_), _) => Some(LOCAL_COMMITS.to_owned()),
+        };
+        self.state.last_head.clone_from(&seen.head);
+        let outcome = match (blocked, &self.state.offline) {
+            (Some(reason), _) => Outcome::Blocked(reason),
+            (None, Some(error)) => Outcome::Offline(error.clone()),
+            (None, None) if pulled => Outcome::Pulled,
+            (None, None) => Outcome::Idle,
+        };
+        Ok((outcome, seen))
+    }
+
+    /// Moves the folder and then `main` from `head` to `origin`, as [`Autosave::advance`] does
+    /// without a replay. Returns why it cannot: the changes in the folder that are in the way,
+    /// or the local commits that landed on `main` meanwhile.
+    fn take(&self, head: Option<&str>, origin: &str) -> Result<Result<(), String>> {
+        self.refresh_index()?;
+        let base = head.unwrap_or(replay::EMPTY_TREE);
+        let run = self.git.run(&["read-tree", "-m", "-u", base, origin])?;
+        if !run.success {
+            let folder = Folder::read(&self.git)?;
+            let changed = self.changed(base, origin)?;
+            let mut in_the_way: Vec<String> = folder
+                .changes
+                .iter()
+                .filter(|change| changed.iter().any(|path| overlaps(&change.path, path)))
+                .map(|change| String::from_utf8_lossy(&change.path).into_owned())
+                .collect();
+            if in_the_way.is_empty() {
+                bail!("git read-tree -m -u failed: {}", run.error());
+            }
+            in_the_way.sort();
+            return Ok(Err(format!(
+                "the folder follows the server, and these changes in it are in the way of the \
+                 server's: {}",
+                in_the_way.join(", ")
+            )));
+        }
+        let old = head.unwrap_or(git::NO_OBJECT);
+        let args = [
+            "update-ref",
+            "-m",
+            MOVE_MESSAGE,
+            "refs/heads/main",
+            origin,
+            old,
+        ];
+        let swap = self.git.run(&args)?;
+        if swap.success {
+            return Ok(Ok(()));
+        }
+        if self.head()?.as_deref() == head {
+            bail!("git update-ref failed: {}", swap.error());
+        }
+        Ok(Err(LOCAL_COMMITS.to_owned()))
+    }
+
+    /// Stores the file stats in the index once the head has held for a whole tick, which the
+    /// service's own `git status` does not.
+    fn refresh_when_held(&mut self, folder: &Folder) -> Result<()> {
+        if folder.head.is_some()
+            && folder.head == self.state.last_head
+            && self.state.refreshed != folder.head
+        {
+            let run = self.git.run(&["update-index", "-q", "--refresh"])?;
+            if run.success {
+                self.state.refreshed.clone_from(&folder.head);
+            }
+        }
+        Ok(())
     }
 
     /// Why the folder must not be touched now, from what Git leaves in `.git`. An
@@ -677,6 +782,15 @@ impl Autosave {
     /// two-way merge refuses to overwrite them, and no save will ever take them, so the folder
     /// cannot move until a person fixes them.
     fn left_in_the_way(&self, folder: &Folder, from: &str, to: &str) -> Result<Vec<Left>> {
+        let changed = self.changed(from, to)?;
+        Ok(save::left(folder)
+            .into_iter()
+            .filter(|left| changed.iter().any(|path| overlaps(&left.path, path)))
+            .collect())
+    }
+
+    /// The paths of the files that differ between the trees of `from` and `to`.
+    fn changed(&self, from: &str, to: &str) -> Result<Vec<Vec<u8>>> {
         let changed = self.git.ok(&[
             "diff-tree",
             "-r",
@@ -686,18 +800,10 @@ impl Autosave {
             from,
             to,
         ])?;
-        let changed: Vec<&[u8]> = changed
+        Ok(changed
             .split(|&b| b == 0)
             .filter(|path| !path.is_empty())
-            .collect();
-        Ok(save::left(folder)
-            .into_iter()
-            .filter(|left| {
-                changed.iter().any(|path| {
-                    *path == left.path
-                        || (left.path.ends_with(b"/") && path.starts_with(&left.path))
-                })
-            })
+            .map(<[u8]>::to_vec)
             .collect())
     }
 
@@ -841,6 +947,25 @@ impl Autosave {
             self.state.logged_skipped = skipped;
         }
     }
+}
+
+/// Why the folder is not on `main`, if it is not.
+fn off_main(folder: &Folder) -> Option<String> {
+    match folder.branch.as_deref() {
+        Some("main") => None,
+        Some(other) => Some(format!("HEAD is on {other}, not main")),
+        None => Some("HEAD is detached, not on main".to_owned()),
+    }
+}
+
+/// Whether a change in the folder at `path` is in the way of a change to the file at `changed`:
+/// the same path, or a folder that holds the other. A nested repository's path ends in `/`.
+fn overlaps(path: &[u8], changed: &[u8]) -> bool {
+    let path = path.strip_suffix(b"/").unwrap_or(path);
+    let inside = |inner: &[u8], outer: &[u8]| {
+        inner.len() > outer.len() && inner.starts_with(outer) && inner[outer.len()] == b'/'
+    };
+    path == changed || inside(changed, path) || inside(path, changed)
 }
 
 /// Why the folder cannot take the server's changes, naming each left-out file in the way.

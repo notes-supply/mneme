@@ -172,6 +172,9 @@ struct PagesBody {
 #[derive(Serialize)]
 struct PageBody {
     page: Page,
+    /// The commit of the page's newest event, which a change through the editing API names as
+    /// its base.
+    commit: Option<String>,
     /// `None` for a deleted page.
     markdown: Option<String>,
     windows: Vec<Window>,
@@ -240,13 +243,15 @@ async fn page(
     let id = PageId::from(id);
     wiki.read(move |repo, index| {
         let page = index.page(&id)?;
-        let markdown = match index.text(&id, None)?.blob {
+        let newest = index.text(&id, None)?;
+        let markdown = match newest.blob {
             Some(blob) => Some(repo.text(blob)?),
             None => None,
         };
         let windows = index.windows(&id, now())?;
         Ok(PageBody {
             page,
+            commit: newest.commit,
             markdown,
             windows,
         })

@@ -1,7 +1,9 @@
 mod api;
 mod autosave;
 mod cli;
+mod edit;
 mod folder;
+mod follow;
 mod git;
 mod history;
 mod init;
@@ -12,3 +14,4 @@ mod push;
 mod remote;
 mod server;
 mod simulation;
+mod tokens;

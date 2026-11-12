@@ -1,5 +1,6 @@
 //! Git smart HTTP under `/git/wiki.git/`, by running `git http-backend` as a CGI child. Bodies
-//! stream through in both directions, so a pack is never held in memory whole.
+//! stream through in both directions, so a pack is never held in memory whole. A machine with a
+//! read-only token may fetch and report, and is refused before Git runs when it would push.
 
 use std::path::Path;
 use std::process::{Command as StdCommand, Stdio};
@@ -8,9 +9,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
-use axum::http::header::{
-    AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, WWW_AUTHENTICATE,
-};
+use axum::http::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -21,7 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 
-use crate::auth::Tokens;
+use crate::auth::{Access, Machine, Tokens, unauthorized};
 use crate::machines::{MAX_REPORT, REPORT_HEADER, Report, Unreadable};
 use crate::serve::Wiki;
 use crate::{hook, log, now};
@@ -33,9 +32,9 @@ const MAX_HEADERS: usize = 64 << 10;
 /// How much of the child's standard error is logged. The rest is read and dropped.
 const MAX_STDERR: u64 = 16 << 10;
 
-/// The machine a Git request came from, for the request log.
-#[derive(Clone, Debug)]
-pub struct Machine(pub String);
+/// The services of smart HTTP that `info/refs?service=` names.
+const UPLOAD: &str = "git-upload-pack";
+const RECEIVE: &str = "git-receive-pack";
 
 #[derive(Clone)]
 struct Git {
@@ -45,11 +44,8 @@ struct Git {
 
 /// The smart HTTP routes. Every request needs a machine's token, and may carry its autosave
 /// service's report.
-pub fn router(wiki: Arc<Wiki>, tokens: Tokens) -> Router {
-    let git = Git {
-        wiki,
-        tokens: Arc::new(tokens),
-    };
+pub fn router(wiki: Arc<Wiki>, tokens: Arc<Tokens>) -> Router {
+    let git = Git { wiki, tokens };
     Router::new()
         .route(&format!("{PREFIX}/info/refs"), any(backend))
         .route(&format!("{PREFIX}/git-upload-pack"), any(backend))
@@ -94,20 +90,48 @@ fn run(command: &mut StdCommand) -> Result<()> {
     Ok(())
 }
 
-fn unauthorized() -> Response {
-    (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, "Bearer")]).into_response()
+/// The service a request runs, from its path and, for `info/refs`, the last `service` in its
+/// query, as `git http-backend` reads it. Only the two services are named; anything else is the
+/// ref listing of the dumb protocol, `None`.
+fn service(path_info: &str, query: Option<&str>) -> Option<&'static str> {
+    match path_info {
+        "/git-upload-pack" => Some(UPLOAD),
+        "/git-receive-pack" => Some(RECEIVE),
+        _ => query?
+            .split('&')
+            .filter_map(|pair| pair.strip_prefix("service="))
+            .next_back()
+            .and_then(|named| [UPLOAD, RECEIVE].into_iter().find(|known| *known == named)),
+    }
 }
 
 /// A report the request carries is stored, and the request is not counted as the machine's
 /// last sync. A report that cannot be stored fails the request, so its service sends it again.
 async fn backend(State(git): State<Git>, request: Request) -> Response {
-    let Some(machine) = git
+    let Some((machine, access)) = git
         .tokens
         .machine(request.headers().get(AUTHORIZATION))
-        .map(str::to_owned)
+        .map(|(machine, access)| (machine.to_owned(), access))
     else {
         return unauthorized();
     };
+    let path_info = request
+        .uri()
+        .path()
+        .strip_prefix(PREFIX)
+        .unwrap_or_default();
+    if access == Access::Read && service(path_info, request.uri().query()) == Some(RECEIVE) {
+        let reason =
+            format!("mneme: {machine} has a read-only token, which may fetch but not push\n");
+        let mut response = (
+            StatusCode::FORBIDDEN,
+            [(CONTENT_TYPE, "text/plain; charset=utf-8")],
+            reason,
+        )
+            .into_response();
+        response.extensions_mut().insert(Machine(machine));
+        return response;
+    }
     match request
         .headers()
         .get(REPORT_HEADER)
@@ -151,6 +175,11 @@ async fn backend(State(git): State<Git>, request: Request) -> Response {
 async fn cgi(wiki: Arc<Wiki>, machine: &str, request: Request) -> Result<Response> {
     let (parts, body) = request.into_parts();
     let path_info = parts.uri.path().strip_prefix(PREFIX).unwrap_or_default();
+    // http-backend gets only the service read here, so what was checked is what Git runs.
+    let query = match service(path_info, parts.uri.query()) {
+        Some(service) if path_info == "/info/refs" => format!("service={service}"),
+        _ => String::new(),
+    };
     let push = path_info == "/git-receive-pack";
     let mut command = Command::new("git");
     command
@@ -161,7 +190,7 @@ async fn cgi(wiki: Arc<Wiki>, machine: &str, request: Request) -> Result<Respons
         .env("GIT_HTTP_EXPORT_ALL", "1")
         .env("REQUEST_METHOD", parts.method.as_str())
         .env("PATH_INFO", path_info)
-        .env("QUERY_STRING", parts.uri.query().unwrap_or_default())
+        .env("QUERY_STRING", query)
         .env("REMOTE_USER", machine);
     for (header, variable) in [
         (CONTENT_TYPE, "CONTENT_TYPE"),
@@ -298,6 +327,44 @@ async fn pump(mut stdout: BufReader<ChildStdout>, sender: &mpsc::Sender<std::io:
                 let _ = sender.send(Err(error)).await;
                 return;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_service_is_read_from_the_path_or_the_last_service_in_the_query() {
+        for (path, query, service_named) in [
+            ("/git-upload-pack", None, Some(UPLOAD)),
+            (
+                "/git-receive-pack",
+                Some("service=git-upload-pack"),
+                Some(RECEIVE),
+            ),
+            ("/info/refs", Some("service=git-upload-pack"), Some(UPLOAD)),
+            (
+                "/info/refs",
+                Some("service=git-receive-pack"),
+                Some(RECEIVE),
+            ),
+            (
+                "/info/refs",
+                Some("service=git-upload-pack&service=git-receive-pack"),
+                Some(RECEIVE),
+            ),
+            (
+                "/info/refs",
+                Some("service=git-receive-pack&x=1"),
+                Some(RECEIVE),
+            ),
+            ("/info/refs", Some("service=git%2Dreceive-pack"), None),
+            ("/info/refs", Some("service=git-receive-packs"), None),
+            ("/info/refs", None, None),
+        ] {
+            assert_eq!(service(path, query), service_named, "{path} {query:?}");
         }
     }
 }

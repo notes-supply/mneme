@@ -1,5 +1,6 @@
 //! The gate for the autosave service: three clones, each with its own service, against one real
 //! server, and again against a bare repository with no push check, as any Git host holds one.
+//! Beside them a fourth clone follows, with a read-only token on the server, and nobody edits it.
 //! The test drives every tick with a fake clock, in an order a seeded generator picks, and
 //! between ticks does what writers do. `MNEME_SIM_SEEDS` sets how many seeds run,
 //! `MNEME_SIM_SEED` runs one seed, and `MNEME_SIM_STEPS` sets the steps per seed.
@@ -15,13 +16,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mneme::autosave::{Autosave, Config, Login, Outcome, Remote, Settings, Token};
+use mneme::autosave::{Autosave, Login, Outcome, Remote, Settings, Token};
 use mneme::rules::{self, Entry, MAX_FILE, MAX_PAGE};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::git::{self, Isolation};
-use crate::server::{MACHINES, Server};
+use crate::server::{MACHINES, Options, READER, Server};
 
 const QUIET: Duration = Duration::from_secs(15);
 const FETCH_EVERY: Duration = Duration::from_secs(30);
@@ -76,7 +77,13 @@ enum Upstream {
 impl Upstream {
     fn new(kind: Kind, git: &Isolation) -> Self {
         match kind {
-            Kind::Server => Self::Server(Server::empty(git)),
+            Kind::Server => {
+                let options = Options {
+                    reader: true,
+                    ..Options::default()
+                };
+                Self::Server(Server::empty_with(git, &options))
+            }
             Kind::Bare => {
                 let dir = TempDir::new().unwrap();
                 let repo = dir.path().join("wiki.git");
@@ -172,6 +179,8 @@ struct Tally {
     replays_that_overlapped: usize,
     replays_that_merged: usize,
     dropped_as_already_there: usize,
+    follower_ticks: usize,
+    follower_pulls: usize,
 }
 
 impl Tally {
@@ -198,6 +207,8 @@ impl Tally {
         self.replays_that_overlapped += other.replays_that_overlapped;
         self.replays_that_merged += other.replays_that_merged;
         self.dropped_as_already_there += other.dropped_as_already_there;
+        self.follower_ticks += other.follower_ticks;
+        self.follower_pulls += other.follower_pulls;
     }
 }
 
@@ -358,6 +369,9 @@ struct Sim {
     racy: (TempDir, std::path::PathBuf),
     racing: usize,
     clones: Vec<Clone>,
+    /// A clone whose service only follows, which nobody edits, and what each of its ticks did.
+    follower: Option<Clone>,
+    followed: Vec<Outcome>,
     now: SystemTime,
     counter: u64,
     /// Every commit a clone made, by clone, from its reflog.
@@ -384,6 +398,8 @@ impl Sim {
             racy: (racy, program),
             racing: usize::try_from(seed % 3).unwrap(),
             clones: Vec::new(),
+            follower: None,
+            followed: Vec::new(),
             now,
             counter: 0,
             made: Vec::new(),
@@ -394,9 +410,10 @@ impl Sim {
         };
         sim.start_pages();
         for (index, (machine, token)) in MACHINES.into_iter().enumerate() {
-            let clone = sim.clone_as(machine, token, index == sim.racing);
+            let clone = sim.clone_as(machine, token, index == sim.racing, false);
             sim.clones.push(clone);
         }
+        sim.follower = Some(sim.clone_as(READER.0, READER.1, false, true));
         sim
     }
 
@@ -432,7 +449,13 @@ impl Sim {
             .to_owned();
     }
 
-    fn clone_as(&self, machine: &'static str, token: &'static str, racing: bool) -> Clone {
+    fn clone_as(
+        &self,
+        machine: &'static str,
+        token: &'static str,
+        racing: bool,
+        follow: bool,
+    ) -> Clone {
         let dir = TempDir::new().unwrap();
         let git = Isolation::new();
         let header = format!("http.extraHeader=Authorization: Bearer {token}");
@@ -444,29 +467,24 @@ impl Sim {
         } else {
             "git".into()
         };
-        let service = match &self.server {
-            Upstream::Server(server) => Autosave::new(Config {
-                folder: dir.path().to_owned(),
-                server: server.url.clone(),
+        let remote = match &self.server {
+            Upstream::Server(server) => Remote::Server {
+                url: server.url.clone(),
                 token: Token(token.to_owned()),
-                machine: machine.to_owned(),
-                quiet: QUIET,
-                fetch_every: FETCH_EVERY,
-                report_every: Duration::from_secs(300),
-                stale_lock: STALE_LOCK,
-                git: program,
-            }),
-            Upstream::Bare(_) => Autosave::new(Settings {
-                folder: dir.path().to_owned(),
-                remote: Remote::git(&url, Login::default()).unwrap(),
-                machine: machine.to_owned(),
-                quiet: QUIET,
-                fetch_every: FETCH_EVERY,
-                report_every: Duration::from_secs(300),
-                stale_lock: STALE_LOCK,
-                git: program,
-            }),
+            },
+            Upstream::Bare(_) => Remote::git(&url, Login::default()).unwrap(),
         };
+        let service = Autosave::new(Settings {
+            folder: dir.path().to_owned(),
+            remote,
+            machine: machine.to_owned(),
+            quiet: QUIET,
+            fetch_every: FETCH_EVERY,
+            report_every: Duration::from_secs(300),
+            stale_lock: STALE_LOCK,
+            git: program,
+            follow,
+        });
         let mut clone = Clone {
             machine,
             token,
@@ -537,6 +555,27 @@ impl Sim {
         let by = Duration::from_secs(self.rng.u64(1..=12));
         self.advance(by);
         self.tick_now(clone);
+        if self.rng.u32(..4) == 0 {
+            self.tick_follower();
+        }
+    }
+
+    fn tick_follower(&mut self) -> Outcome {
+        let now = self.now;
+        let follower = self.follower.as_mut().unwrap();
+        let outcome = follower.service.tick(now);
+        let line = format!("{:>6} {:<8} tick: {outcome:?}", secs(now) - START, READER.0);
+        self.trace.push(line);
+        self.followed.push(outcome.clone());
+        self.tally.follower_ticks += 1;
+        if outcome == Outcome::Pulled {
+            self.tally.follower_pulls += 1;
+        }
+        outcome
+    }
+
+    fn follower(&self) -> &Clone {
+        self.follower.as_ref().unwrap()
     }
 
     fn tick_now(&mut self, clone: usize) -> Outcome {
@@ -1077,10 +1116,13 @@ impl Sim {
                 self.advance(FETCH_EVERY + Duration::from_secs(1));
                 changed |= self.tick_now(clone) != Outcome::Idle;
             }
+            self.advance(FETCH_EVERY + Duration::from_secs(1));
+            changed |= self.tick_follower() != Outcome::Idle;
             let head = self.server_head();
             let settled = self
                 .clones
                 .iter()
+                .chain(self.follower.as_ref())
                 .all(|clone| clone.head() == head && clone.status().is_empty());
             if !changed && settled {
                 return;
@@ -1123,6 +1165,54 @@ impl Sim {
             stuck.is_empty(),
             "seed {seed}: no tick was blocked or stopped: {stuck:?}"
         );
+        self.check_follower(&head);
+    }
+
+    /// The follower ends at the server's head, clean, without a blocked tick, and its `main`
+    /// only ever moved to follow.
+    fn check_follower(&self, head: &str) {
+        let seed = self.seed;
+        let follower = self.follower();
+        assert_eq!(
+            follower.head(),
+            head,
+            "seed {seed}: the follower has the server's main"
+        );
+        assert_eq!(follower.status(), "", "seed {seed}: the follower is clean");
+        let not_followed: Vec<_> = self
+            .followed
+            .iter()
+            .filter(|outcome| !matches!(outcome, Outcome::Idle | Outcome::Pulled))
+            .collect();
+        assert!(
+            not_followed.is_empty(),
+            "seed {seed}: every tick of the follower was idle or pulled: {not_followed:?}"
+        );
+        assert!(
+            self.followed.contains(&Outcome::Pulled),
+            "seed {seed}: the follower pulled"
+        );
+        for line in reflog(follower) {
+            let (_, message) = line.split_once('\t').unwrap();
+            assert!(
+                message.starts_with("clone") || message.starts_with("autosave: move"),
+                "seed {seed}: the follower's main only followed: {line}"
+            );
+        }
+        if let Upstream::Server(server) = &self.server {
+            let machines = server.json("/v1/machines");
+            let reported = machines["machines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|machine| machine["name"] == READER.0)
+                .unwrap();
+            assert_eq!(
+                (&reported["current"], &reported["behind_since"]),
+                (&json!(true), &Value::Null),
+                "seed {seed}: the follower reports the server's head"
+            );
+        }
     }
 
     /// Each clone's report lists the files its service leaves in the folder.

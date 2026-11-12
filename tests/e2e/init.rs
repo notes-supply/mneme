@@ -288,6 +288,7 @@ fn init_takes_a_folder_of_files_when_the_remote_has_no_main_and_refuses_otherwis
         report_every: Duration::from_secs(300),
         stale_lock: Duration::from_secs(300),
         git: "git".into(),
+        follow: false,
     });
     assert_eq!(service.tick(SystemTime::now()), Outcome::Pushed);
     assert_eq!(git.ok(&empty, &["show", "main:old/trip.md"]), "# A trip\n");
@@ -488,4 +489,60 @@ fn init_writes_the_path_of_a_file_url_into_the_units_writable_paths() {
         stderr(&refused).contains("names a host other than localhost"),
         "{refused:?}"
     );
+}
+
+#[test]
+fn init_with_follow_writes_a_unit_that_follows_and_writes_only_the_folder() {
+    let machine = Machine::new();
+    let bare = bare_wiki(&machine.git, machine.root());
+    let folder = machine.root().join("mirror");
+    let (folder_arg, bare_arg) = (folder.to_str().unwrap(), bare.to_str().unwrap());
+    let args = [
+        "--folder", folder_arg, "--remote", bare_arg, "--name", "mirror", "--follow",
+    ];
+    let output = machine.init(&args);
+    assert!(output.status.success(), "{output:?}");
+    assert!(folder.join("notes.md").exists(), "the wiki was cloned");
+    let unit = machine.unit();
+    let exec_start = format!(
+        "ExecStart={} autosave run --folder {folder_arg} --remote {bare_arg} --name mirror \
+         --follow\n",
+        env!("CARGO_BIN_EXE_mneme")
+    );
+    assert!(unit.contains(&exec_start), "{unit}");
+    assert!(
+        unit.contains(&format!("ReadWritePaths={folder_arg}\n")),
+        "a follower never writes the remote: {unit}"
+    );
+
+    let empty = machine.root().join("empty.git");
+    machine.git.ok(
+        machine.root(),
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            empty.to_str().unwrap(),
+        ],
+    );
+    let notes = machine.root().join("notes");
+    fs::create_dir(&notes).unwrap();
+    fs::write(notes.join("mine.md"), "# Mine\n").unwrap();
+    let refused = machine.init(&[
+        "--folder",
+        notes.to_str().unwrap(),
+        "--remote",
+        empty.to_str().unwrap(),
+        "--name",
+        "mirror",
+        "--follow",
+        "--no-service",
+    ]);
+    assert!(
+        !refused.status.success(),
+        "a follower takes no folder of files: {refused:?}"
+    );
+    assert!(!notes.join(".git").exists());
 }

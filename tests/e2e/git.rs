@@ -34,6 +34,23 @@ pub fn racy_git(dir: &Path) -> PathBuf {
     program
 }
 
+/// Writes [`RACY_GIT`] into `dir` as `git`, running the real one, for a program such as the
+/// server that finds `git` on `PATH`. Put `dir` first on its `PATH`.
+pub fn racy_git_on_path(dir: &Path) {
+    let real = format!("exec '{}' \"$@\"", real_git().display());
+    let program = dir.join("git");
+    fs::write(&program, RACY_GIT.replace(r#"exec git "$@""#, &real)).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The real `git` on `PATH`.
+pub fn real_git() -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .unwrap()
+}
+
 /// Empty configuration for every `git` the tests run. The machine's global gitignore would
 /// otherwise hide files such as `AGENTS.md`.
 pub struct Isolation {

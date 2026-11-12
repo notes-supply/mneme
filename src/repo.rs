@@ -11,6 +11,10 @@ use gix::objs::tree::EntryMode;
 
 /// The branch that holds the wiki. The push check keeps every other ref out.
 pub const MAIN: &str = "refs/heads/main";
+/// The tree with nothing in it, which a commit with no parent is compared with.
+pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+/// The id Git reads as no object at all, such as the old value of a ref that must not exist yet.
+pub const NO_OBJECT: &str = "0000000000000000000000000000000000000000";
 
 /// A commit that `main` no longer holds, as when someone reset `main` by hand.
 #[derive(Debug, thiserror::Error)]

@@ -10,7 +10,7 @@ mise run gate
 
 The gate checks formatting, runs clippy with warnings denied, runs the tests with nextest, checks the RustSec advisories, lints the CI workflows with actionlint and zizmor, and lints the shell scripts with shellcheck. CI runs the same command. Set `MISE_OFFLINE=1` to check the advisories against the local copy of the database without fetching it.
 
-The tests include a simulation of three clones and a server over 128 seeds, and the same against a bare repository. `mise run soak` runs 2000 seeds of each and the kill test over 20. They also pipe `install.sh` to `sh` against a fake release served on loopback, for a good install, a bad checksum, an unknown architecture and the cosign check.
+The tests include a simulation of three clones, a fourth that follows, and a server over 128 seeds, and the same against a bare repository. `mise run soak` runs 2000 seeds of each and the kill test over 20. They also pipe `install.sh` to `sh` against a fake release served on loopback, for a good install, a bad checksum, an unknown architecture and the cosign check.
 
 `mise run image` builds the server's image and checks it with a real clone and push, the autosave service run from the image against it, and a Trivy scan (see [deploy.md](deploy.md)).
 

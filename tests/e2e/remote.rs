@@ -52,13 +52,13 @@ pub fn mneme(git: &Isolation, bin: &Path) -> Command {
 }
 
 /// A running `mneme autosave run` and what it has logged.
-struct Service {
+pub struct Service {
     child: Child,
     log: Arc<Mutex<Vec<String>>>,
 }
 
 impl Service {
-    fn start(mut command: Command) -> Self {
+    pub fn start(mut command: Command) -> Self {
         let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
         let stderr = BufReader::new(child.stderr.take().unwrap());
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -72,7 +72,7 @@ impl Service {
     }
 
     /// Waits until the service has logged the outcome `outcome`.
-    fn wait_for(&self, outcome: &str) {
+    pub fn wait_for(&self, outcome: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         let wanted = format!(r#""outcome":"{outcome}""#);
         while !self
@@ -91,7 +91,8 @@ impl Service {
         }
     }
 
-    fn terminate(mut self) -> Vec<String> {
+    /// Stops the service with SIGTERM and returns everything it logged.
+    pub fn terminate(mut self) -> Vec<String> {
         let pid = self.child.id().to_string();
         assert!(
             Command::new("kill")
@@ -179,18 +180,32 @@ fn a_path_remote_is_cloned_and_saved_to_by_the_service() {
 }
 
 /// `git http-backend` over plain HTTP on a free port, behind a check of the `Authorization`
-/// header. It records every request's header.
-struct Backend {
-    url: String,
+/// header. It records every request's header and target.
+pub struct Backend {
+    pub url: String,
     seen: Arc<Mutex<Vec<Option<String>>>>,
+    /// The request target of each request, path and query.
+    pub targets: Arc<Mutex<Vec<String>>>,
 }
 
 impl Backend {
     fn start(git: &Isolation, root: &Path, authorization: String) -> Self {
+        Self::start_with(git, root, authorization, false)
+    }
+
+    /// A backend whose token may only read: it refuses every request towards a push with 403,
+    /// as a Git host does for a token without write access.
+    pub fn read_only(git: &Isolation, root: &Path, authorization: String) -> Self {
+        Self::start_with(git, root, authorization, true)
+    }
+
+    fn start_with(git: &Isolation, root: &Path, authorization: String, read_only: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let targets = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&seen);
+        let targeted = Arc::clone(&targets);
         let root = root.to_owned();
         let mut cgi = Command::new("git");
         git.apply(&mut cgi);
@@ -202,12 +217,19 @@ impl Backend {
             .collect();
         thread::spawn(move || {
             for stream in listener.incoming().map_while(Result::ok) {
-                let recorded = Arc::clone(&recorded);
+                let (recorded, targeted) = (Arc::clone(&recorded), Arc::clone(&targeted));
                 let (root, env, authorization) = (root.clone(), env.clone(), authorization.clone());
-                thread::spawn(move || serve(stream, &root, &env, &authorization, &recorded));
+                thread::spawn(move || {
+                    let seen = Seen {
+                        authorization: &recorded,
+                        targets: &targeted,
+                        read_only,
+                    };
+                    serve(stream, &root, &env, &authorization, &seen);
+                });
             }
         });
-        Self { url, seen }
+        Self { url, seen, targets }
     }
 }
 
@@ -274,23 +296,36 @@ impl Request {
     }
 }
 
+/// What the test server records of each request, and whether it refuses a push.
+struct Seen<'a> {
+    authorization: &'a Mutex<Vec<Option<String>>>,
+    targets: &'a Mutex<Vec<String>>,
+    read_only: bool,
+}
+
 /// Answers one request on `stream`, then closes it.
 fn serve(
     mut stream: TcpStream,
     root: &Path,
     env: &[(String, String)],
     authorization: &str,
-    seen: &Mutex<Vec<Option<String>>>,
+    seen: &Seen<'_>,
 ) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let request = Request::read(&mut reader);
+    seen.targets.lock().unwrap().push(request.target.clone());
     let given = request.header("authorization");
-    seen.lock().unwrap().push(given.clone());
+    seen.authorization.lock().unwrap().push(given.clone());
     if given.as_deref() != Some(authorization) {
         let _ = stream.write_all(
             b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"wiki\"\r\n\
               Content-Length: 0\r\nConnection: close\r\n\r\n",
         );
+        return;
+    }
+    if seen.read_only && request.target.contains("git-receive-pack") {
+        let _ = stream
+            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
     }
     let body = request.body(&mut reader);
@@ -415,6 +450,7 @@ fn an_https_remote_gets_the_token_as_basic_authentication_and_nowhere_else() {
         report_every: Duration::from_secs(300),
         stale_lock: Duration::from_secs(300),
         git: "git".into(),
+        follow: false,
     });
     write_quiet(&folder.join("notes.md"), "# Notes\n\nSaved over HTTPS.\n");
     assert_eq!(service.tick(SystemTime::now()), Outcome::Pushed);

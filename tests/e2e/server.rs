@@ -25,6 +25,23 @@ pub const MACHINES: [(&str, &str); 3] = [
     ("laptop", TOKEN),
     ("tablet", "test-token-of-tablet"),
 ];
+/// A machine whose token may only read, which a server started with [`Options::reader`] knows.
+pub const READER: (&str, &str) = ("mirror", "test-token-of-mirror");
+/// The variable a server started with [`Options::tokens_env`] reads its tokens from.
+const TOKENS_ENV: &str = "MNEME_TEST_TOKENS";
+
+/// How a test server starts, beyond the defaults.
+#[derive(Clone, Debug, Default)]
+pub struct Options {
+    /// Also know [`READER`], with a read-only token.
+    pub reader: bool,
+    /// Take the tokens from an environment variable instead of a file.
+    pub tokens_env: bool,
+    /// `--private-api`: every `/v1` route asks for a token.
+    pub private_api: bool,
+    /// A folder to put first on the server's `PATH`, such as one with a `git` of a test's own.
+    pub path: Option<PathBuf>,
+}
 
 pub struct Server {
     child: Child,
@@ -33,6 +50,7 @@ pub struct Server {
     log: Arc<Mutex<Vec<String>>>,
     reader: Option<thread::JoinHandle<()>>,
     dirs: Vec<TempDir>,
+    options: Options,
 }
 
 pub struct Reply {
@@ -108,42 +126,75 @@ fn dechunk(mut raw: &[u8]) -> Vec<u8> {
 impl Server {
     /// Serves a bare clone of `work`.
     pub fn of(work: &Work) -> Self {
+        Self::of_with(work, &Options::default())
+    }
+
+    pub fn of_with(work: &Work, options: &Options) -> Self {
         let bare = TempDir::new().unwrap();
         let path = bare.path().to_str().unwrap();
         work.ok(&["clone", "-q", "--bare", ".", path]);
         let path = bare.path().to_owned();
-        Self::spawn(path, &work.git, vec![bare])
+        Self::spawn(path, &work.git, vec![bare], options)
     }
 
     /// Serves a repository that does not exist yet, so the server creates it.
     pub fn empty(git: &Isolation) -> Self {
+        Self::empty_with(git, &Options::default())
+    }
+
+    pub fn empty_with(git: &Isolation, options: &Options) -> Self {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("wiki.git");
-        Self::spawn(path, git, vec![dir])
+        Self::spawn(path, git, vec![dir], options)
     }
 
     /// A second server on this one's repository, which builds its index afresh.
     pub fn again(&self, git: &Isolation) -> Self {
-        Self::spawn(self.repo.clone(), git, Vec::new())
+        Self::spawn(self.repo.clone(), git, Vec::new(), &self.options)
     }
 
     /// Starts the server on `repo`, with `git` isolated as the tests' own commands are.
-    fn spawn(repo: PathBuf, git: &Isolation, mut dirs: Vec<TempDir>) -> Self {
-        let tokens = TempDir::new().unwrap();
-        let hashes: serde_json::Map<String, Value> = MACHINES
+    fn spawn(repo: PathBuf, git: &Isolation, mut dirs: Vec<TempDir>, options: &Options) -> Self {
+        let mut hashes: serde_json::Map<String, Value> = MACHINES
             .iter()
             .map(|(machine, token)| ((*machine).to_owned(), mneme_hash(token).into()))
             .collect();
-        let file = tokens.path().join("tokens.json");
-        fs::write(&file, Value::Object(hashes).to_string()).unwrap();
-        dirs.push(tokens);
+        if options.reader {
+            let (machine, token) = READER;
+            let entry = serde_json::json!({ "sha256": mneme_hash(token), "access": "read" });
+            hashes.insert(machine.to_owned(), entry);
+        }
+        let tokens = Value::Object(hashes).to_string();
         let mut command = Command::new(env!("CARGO_BIN_EXE_mneme"));
-        command
-            .args(["serve", "--addr", "127.0.0.1:0", "--tokens"])
-            .arg(&file)
-            .arg("--repo")
-            .arg(&repo);
-        Self::launch(git.apply(&mut command), repo, dirs)
+        command.args(["serve", "--addr", "127.0.0.1:0"]);
+        git.apply(&mut command);
+        if options.tokens_env {
+            command
+                .args(["--tokens-env", TOKENS_ENV])
+                .env(TOKENS_ENV, tokens);
+        } else {
+            let dir = TempDir::new().unwrap();
+            let file = dir.path().join("tokens.json");
+            fs::write(&file, tokens).unwrap();
+            command.arg("--tokens").arg(&file);
+            dirs.push(dir);
+        }
+        if options.private_api {
+            command.arg("--private-api");
+        }
+        if let Some(first) = &options.path {
+            let path = std::env::join_paths(
+                [first.clone()]
+                    .into_iter()
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap();
+            command.env("PATH", path);
+        }
+        command.arg("--repo").arg(&repo);
+        let mut server = Self::launch(&mut command, repo, dirs);
+        server.options = options.clone();
+        server
     }
 
     /// `mneme serve --folder` on a clone, on a free loopback port, with no `git` on `PATH`.
@@ -189,6 +240,7 @@ impl Server {
             log,
             reader: Some(reader),
             dirs,
+            options: Options::default(),
         }
     }
 
@@ -205,7 +257,13 @@ impl Server {
     }
 
     /// One request on a connection of its own, which the server closes after the response.
-    fn request(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Reply {
+    pub fn request(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Reply {
         let addr = self.url.trim_start_matches("http://");
         let host = format!("Host: {addr}\r\n");
         self.request_as(&host, method, path, headers, body)
@@ -252,7 +310,12 @@ impl Server {
     /// stopped server's status and log.
     pub fn restart(mut self, git: &Isolation) -> (ExitStatus, Vec<String>, Self) {
         let (status, log) = self.stop();
-        let again = Self::spawn(self.repo.clone(), git, std::mem::take(&mut self.dirs));
+        let again = Self::spawn(
+            self.repo.clone(),
+            git,
+            std::mem::take(&mut self.dirs),
+            &self.options,
+        );
         (status, log, again)
     }
 
@@ -303,7 +366,7 @@ impl Server {
     }
 }
 
-fn mneme_hash(token: &str) -> String {
+pub fn mneme_hash(token: &str) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(token.as_bytes())
         .iter()
