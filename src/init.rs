@@ -38,6 +38,10 @@ pub struct Args {
     /// Replace a unit that is already installed and differs.
     #[arg(long)]
     pub force: bool,
+    /// Set up a machine that only keeps a copy: its service takes the remote's changes and
+    /// never stages, commits or pushes. A read-only token is enough.
+    #[arg(long)]
+    pub follow: bool,
 }
 
 /// Makes the folder ready, then installs and starts the service, or prints how to run it.
@@ -59,7 +63,7 @@ pub fn run(args: &Args) -> Result<()> {
     let unit = match &systemctl {
         Some(systemctl) if !args.no_service => {
             let path = config_home(&home).join("systemd/user").join(UNIT);
-            let text = unit(&command, &folder, &remote)?;
+            let text = unit(&command, &folder, &remote, args.follow)?;
             if !args.force && fs::read_to_string(&path).is_ok_and(|installed| installed != text) {
                 bail!(
                     "{} is already there and differs from the unit mneme init would write. \
@@ -80,6 +84,7 @@ pub fn run(args: &Args) -> Result<()> {
         report_every: Duration::from_secs(300),
         stale_lock: Duration::from_secs(300),
         git: PathBuf::from("git"),
+        follow: args.follow,
     })?;
     match ready {
         Ready::Cloned => println!("Cloned the wiki into {}.", folder.display()),
@@ -173,6 +178,9 @@ fn service_command(args: &Args, folder: &Path, name: &str, remote: &Remote) -> R
         ]);
     }
     command.extend(["--name".to_owned(), name.to_owned()]);
+    if args.follow {
+        command.push("--follow".to_owned());
+    }
     Ok(command)
 }
 
@@ -182,10 +190,12 @@ fn utf8(text: OsString) -> Result<String> {
 }
 
 /// The unit for `command`. The service may write the folder, and a remote that is a path on
-/// this machine, and nothing else.
-fn unit(command: &[String], folder: &Path, remote: &Remote) -> Result<String> {
+/// this machine unless it only follows, and nothing else.
+fn unit(command: &[String], folder: &Path, remote: &Remote, follow: bool) -> Result<String> {
     let mut writable = vec![folder.to_owned()];
-    writable.extend(remote.local_path()?);
+    if !follow {
+        writable.extend(remote.local_path()?);
+    }
     let writable = writable
         .iter()
         .map(|path| path_word(path))

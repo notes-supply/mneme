@@ -184,4 +184,6 @@ The autosave service sends these states. The detail is empty unless the list say
 | `blocked` | it waits on the folder and changes nothing; `detail` says why |
 | `stopped` | it refused a save that would delete most pages; `detail` says how many |
 
+A service that follows (`--follow`) never saves, so it sends only `idle`, `pulled`, `offline` and `blocked`, and no skipped files.
+
 Example report, before encoding: [`report.json`](../tests/fixtures/api/report.json).

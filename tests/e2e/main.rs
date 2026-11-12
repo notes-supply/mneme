@@ -3,6 +3,7 @@ mod autosave;
 mod cli;
 mod edit;
 mod folder;
+mod follow;
 mod git;
 mod history;
 mod init;
