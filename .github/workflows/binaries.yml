@@ -143,10 +143,9 @@ jobs:
     needs: [publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # One release at a time moves the tags, so two cannot race to move latest.
-    concurrency:
-      group: image-tags
-      cancel-in-progress: false
+    # No concurrency group: a group keeps one pending run and cancels the others, which would
+    # skip a release. None is needed, since whether latest moves is read from the tags, not from
+    # the order runs finish in, and a newer tag's own run checks minutes later and moves it.
     permissions:
       contents: read # check out mise.toml and list the version tags
       packages: write # add tags to the image
