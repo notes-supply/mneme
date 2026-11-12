@@ -143,6 +143,10 @@ jobs:
     needs: [publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # One release at a time moves the tags, so two cannot race to move latest.
+    concurrency:
+      group: image-tags
+      cancel-in-progress: false
     permissions:
       contents: read # check out mise.toml and list the version tags
       packages: write # add tags to the image
