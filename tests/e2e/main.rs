@@ -5,6 +5,7 @@ mod folder;
 mod git;
 mod history;
 mod init;
+mod install;
 mod kill;
 mod machines;
 mod push;

@@ -150,6 +150,14 @@ The simulation leaves such a lock, half the time with half an index, and the kil
 - **`--name` defaults to the host name up to its first dot,** from `/proc/sys/kernel/hostname`, as systemd's `%l` has it, and `--folder` to `~/wiki`. `$XDG_CONFIG_HOME` counts only when it is an absolute path, as the XDG base directory rules say.
 - **The sandbox was tried once for a plain remote:** a transient `systemd-run --user` with the template's properties adopted a folder of files, saved them and pushed them to a bare repository on the same machine. The tests use a temporary `XDG_CONFIG_HOME` and a `systemctl` on `PATH` that records its arguments.
 
+## The installer
+
+- **`install.sh` installs both apps unless named, from each one's latest release,** and finds the tag by following `releases/latest` to the tag's page, since the signing identity names the tag. Every app is downloaded and checked before any is installed, so a bad checksum or signature leaves the folder as it was. A binary goes into place as a copy in the install folder and a rename, which replaces it in one step even while a service runs the old one.
+- **Everything is in functions, and the last line calls `main`,** so a download cut short by a dropped connection fails to parse and runs nothing. `curl` takes only `https` for the downloads and their redirects.
+- **One override, `MNEME_RELEASES_URL`, replaces `https://github.com/notes-supply`.** Atrium's unit comes from `atrium/raw/<tag>/contrib/atrium.service` below it, which GitHub redirects to the raw file, so a test serves the whole release from one folder. The identity cosign checks never comes from the override.
+- **Atrium's unit is installed only into `~/.local/bin`**, since it runs `%h/.local/bin/atrium` and `%h/.local/bin/mneme`, only when `systemctl --user show-environment` works, and never over a file already there. It is loaded with `daemon-reload` and not enabled, so nothing starts without being asked.
+- **The test pipes the script to `sh -s --`** as the README does, with a `PATH` of only the tools it may use, symlinked from `/usr/bin`, and a `uname`, `git`, `systemctl` and `cosign` of its own, against a release served on loopback. It also checks that the temporary folder is empty afterwards. By hand the script was also run against the real v0.1.0 releases, with cosign, and under busybox `sh` without it.
+
 ## Deployment
 
 - **Flux verifies cosign's classic `.sig` signature, so the release signs in that format.** Flux 2.8.2 found no signature in cosign 3.1.4's default bundle format, which a registry without the referrers API, GHCR among them, stores under a `sha256-<digest>` tag, and it verified the same artifact signed with `--new-bundle-format=false`. Shown on kind with a key; keyless signing is proven only once `release.yml` has run on GitHub.
