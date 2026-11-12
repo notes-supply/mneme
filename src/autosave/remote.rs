@@ -89,8 +89,10 @@ impl Remote {
     /// # Errors
     ///
     /// Fails when the login does not fit the remote: a key for anything but SSH, a token for
-    /// anything but HTTPS, or a password in an HTTPS URL, which belongs in a token file. A key
-    /// whose path is not UTF-8 is refused too, since ssh gets it in a line of configuration.
+    /// anything but HTTPS, or a password in an HTTPS URL, which belongs in a token file. A token
+    /// over plain `http://` is refused too unless the host is this machine, since it would cross
+    /// the network in clear text, and so is a key whose path is not UTF-8, since ssh gets it in
+    /// a line of configuration.
     pub fn git(url: &str, login: Login) -> Result<Self> {
         let transport = Transport::of(url);
         if let Some(key) = &login.ssh_key {
@@ -103,6 +105,12 @@ impl Remote {
         }
         if login.token.is_some() && transport != Transport::Http {
             bail!("--token-file is for an HTTPS remote, and {url} is not one");
+        }
+        if login.token.is_some() && in_clear(url) {
+            bail!(
+                "{url} is plain http, which would send the token in clear text. Use an \
+                 https:// URL, or http:// only to localhost, 127.0.0.1 or [::1]"
+            );
         }
         if transport == Transport::Http && userinfo(url).is_some_and(|info| info.contains(':')) {
             bail!(
@@ -200,6 +208,29 @@ fn userinfo(url: &str) -> Option<&str> {
     let (_, rest) = url.split_once("://")?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     authority.rsplit_once('@').map(|(info, _)| info)
+}
+
+/// Whether `url` is plain `http://` to a host other than this machine, so that whatever it is
+/// sent crosses the network unencrypted.
+fn in_clear(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_and_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = if host_and_port.starts_with('[') {
+        host_and_port
+            .find(']')
+            .map_or(host_and_port, |end| &host_and_port[..=end])
+    } else {
+        host_and_port.split(':').next().unwrap_or_default()
+    };
+    !(host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]")
 }
 
 /// Decodes `%XX` escapes, as Git does for a URL's user name. A broken escape stays as it is.
@@ -329,6 +360,41 @@ mod tests {
         ] {
             assert!(Remote::git(url, login).is_err(), "{url}");
         }
+    }
+
+    #[test]
+    fn a_token_over_plain_http_is_refused_unless_the_host_is_this_machine() {
+        let token = || Login {
+            token: Some(Token("s3cret".to_owned())),
+            ..Login::default()
+        };
+        for url in [
+            "http://example.com/wiki.git",
+            "HTTP://example.com:8080/wiki.git",
+            "http://alice@example.com/wiki.git",
+            "http://192.168.1.10/wiki.git",
+            "http://127.0.0.2/wiki.git",
+            "http://localhost.example.com/wiki.git",
+            "http://[::2]:8080/wiki.git",
+        ] {
+            let refused = Remote::git(url, token()).unwrap_err().to_string();
+            assert!(refused.contains("https"), "{url}: {refused}");
+            assert!(!refused.contains("s3cret"), "{url}: {refused}");
+        }
+        for url in [
+            "http://localhost/wiki.git",
+            "http://LocalHost:8080/wiki.git",
+            "http://127.0.0.1:8080/wiki.git",
+            "http://alice@127.0.0.1:8080/wiki.git",
+            "http://[::1]:8080/wiki.git",
+            "https://example.com/wiki.git",
+        ] {
+            assert!(Remote::git(url, token()).is_ok(), "{url}");
+        }
+        assert!(
+            Remote::git("http://example.com/wiki.git", Login::default()).is_ok(),
+            "without a token, nothing secret is sent"
+        );
     }
 
     #[test]
