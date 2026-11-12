@@ -8,10 +8,20 @@ Mneme runs on Linux, on x86_64 and aarch64, and needs Git 2.45 or newer. Each re
 curl -fsSL https://raw.githubusercontent.com/notes-supply/mneme/main/install.sh | sh
 ```
 
-installs the latest `mneme` and [Atrium](https://github.com/notes-supply/atrium)'s `atrium` into `~/.local/bin`, without sudo. It checks each binary against its release's `SHA256SUMS`, and against its signature when [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is on `PATH`, and installs none unless all pass. Into `~/.local/bin` it also installs Atrium's systemd user unit, when there is none yet, without enabling it. It says when that folder is not on `PATH` or Git is too old, and when it replaced a binary that a running service still uses.
+installs the latest `mneme` and [Atrium](https://github.com/notes-supply/atrium)'s `atrium` into `~/.local/bin`, without sudo. It checks each binary against its release's `SHA256SUMS`, and against its signature when [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is on `PATH`, and installs none unless all pass. Into `~/.local/bin`, on a machine with `systemctl`, it also installs Atrium's systemd user unit when there is none yet, without enabling it. It says when that folder is not on `PATH`, which it must be, or Git is too old, and when it replaced a binary that a running service still uses.
 
-- `sh -s -- mneme` installs Mneme alone, and `sh -s -- atrium` Atrium alone.
+When `curl` fails, the pipe gives `sh` nothing to read and `sh` exits 0, so a failed download can look like a success. To be sure, download the script first:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/notes-supply/mneme/main/install.sh -o install.sh && sh install.sh
+```
+
+- `sh install.sh mneme`, or `sh -s -- mneme` after the pipe, installs Mneme alone, and `atrium` Atrium alone.
 - `MNEME_INSTALL_DIR=/some/folder` installs there instead, and installs no unit.
+
+## Without a systemd user manager
+
+Over SSH, in a container, or on a machine without systemd, there is no user manager to run the services. `mneme init --no-service` makes the folder ready and prints the `mneme autosave run` command, for whatever keeps processes running there; `mneme init` does the same by itself when `systemctl` is not on `PATH`. Atrium runs in a terminal with `atrium --wiki-folder ~/wiki`.
 
 ## mise
 

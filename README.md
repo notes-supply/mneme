@@ -23,11 +23,13 @@ Mneme is a Markdown wiki in Git, made for AI agents and the people who work with
 
 ## Getting started
 
-Install `mneme` and `atrium` into `~/.local/bin` (Linux, x86_64 or aarch64, Git 2.45 or newer):
+Install `mneme` and `atrium` on Linux, x86_64 or aarch64, with Git 2.45 or newer:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/notes-supply/mneme/main/install.sh | sh
 ```
+
+They go into `~/.local/bin`, which must be on your `PATH`; the installer says when it is not.
 
 Make an empty repository on your Git host, and give each machine a token that can write to it alone, in `~/.config/mneme/token`. Then, on each machine:
 
@@ -36,7 +38,7 @@ mneme init --remote https://github.com/your-team/wiki.git --token-file ~/.config
 systemctl --user enable --now atrium
 ```
 
-`~/wiki` now syncs with every other machine, and http://localhost:8080 shows it. [Install](docs/install.md) has mise and how to verify a download, and [Configuration](docs/configuration.md) has the other remotes.
+`~/wiki` now syncs with every other machine, and http://localhost:8080 shows it. Without a systemd user manager, `mneme init --no-service` prints the service's command and `atrium --wiki-folder ~/wiki` runs in a terminal ([Install](docs/install.md#without-a-systemd-user-manager)). [Configuration](docs/configuration.md) has the other remotes.
 
 > [!WARNING]
 > A Mneme server's reading API, `/v1`, has no login: whoever reaches it reads the whole wiki. See [Deploy](docs/deploy.md#run-a-server) before you expose a server.

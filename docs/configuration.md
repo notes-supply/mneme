@@ -4,7 +4,7 @@ Every machine that writes the wiki runs the autosave service on its own folder, 
 
 ## mneme init
 
-`mneme init` makes the folder ready, installs the service as a systemd user unit, and starts it. Run it once on each machine.
+`mneme init` makes the folder ready, installs the service as a systemd user unit, and starts it. Run it once on each machine. With `--no-service`, or without `systemctl` on `PATH`, it prints the command that runs the service instead; pass `--no-service` where `systemctl --user` finds no user manager, as over SSH.
 
 - A missing or empty folder gets a clone. A folder of notes that is not a Git repository becomes the wiki when the remote is empty, and the first save pushes the notes.
 - The unit runs `mneme autosave run` with absolute paths, and its logs are in `journalctl --user -u mneme-autosave`.
@@ -54,7 +54,7 @@ mneme init --remote ~/wiki.git
   <img alt="Atrium's recent changes for the wiki, by laptop and desktop. The newest, a desktop edit of Garden, says laptop edited the same lines." src="images/changes-light.png">
 </picture>
 
-[Atrium](https://github.com/notes-supply/atrium) shows the wiki in `~/wiki` at http://localhost:8080. Start the unit the installer put in place, `systemctl --user enable --now atrium`, or run `atrium --wiki-folder ~/wiki`.
+[Atrium](https://github.com/notes-supply/atrium) shows the wiki in `~/wiki` at http://localhost:8080. The installer puts its unit in place when it installs into `~/.local/bin` on a machine with `systemctl`; start it with `systemctl --user enable --now atrium`. Otherwise run `atrium --wiki-folder ~/wiki`.
 
 Atrium reads the folder through `mneme serve --folder ~/wiki`, which serves the [reading API](api.md) of a clone: pages, history, diffs and search. It listens on loopback only, `127.0.0.1:8081` by default, answers only requests addressed to `localhost`, `127.0.0.1` or `[::1]`, writes nothing, and follows the folder's `main` as the service syncs.
 
