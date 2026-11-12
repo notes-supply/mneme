@@ -1,6 +1,6 @@
 [package]
 name = "mneme"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Autosave for a Markdown wiki in Git, with an optional server and reading API"
 license = "MIT OR Apache-2.0"
