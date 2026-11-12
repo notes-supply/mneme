@@ -1,0 +1,38 @@
+# The autosave service for one wiki folder, as a systemd user unit. mneme init wrote it, with
+# absolute paths, and writes it again when it is run again; pass --force to replace a unit that
+# differs. Its logs: journalctl --user -u mneme-autosave
+
+[Unit]
+Description=Mneme autosave for @FOLDER@
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=@COMMAND@
+Restart=on-failure
+RestartSec=10
+# SIGTERM goes to the service alone, which finishes its tick, so the Git commands it started
+# end on their own instead of being cut off.
+KillMode=mixed
+TimeoutStopSec=60
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@WRITABLE@
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=default.target

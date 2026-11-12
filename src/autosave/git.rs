@@ -166,6 +166,29 @@ impl Git {
         finish(command, &["clone"], &[])
     }
 
+    /// Makes the folder a repository on `main`, without touching a file in it.
+    pub fn init_folder(&self) -> Result<Run> {
+        let mut command = self.command(&[]);
+        command
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .args(["init", "--quiet", "--initial-branch=main"])
+            .arg(&self.folder);
+        finish(command, &["init"], &[])
+    }
+
+    /// Asks the remote for its `main`. It needs no repository, so it works when the folder is
+    /// not one.
+    pub fn ask_remote(&self) -> Result<Run> {
+        let mut command = self.command(&[]);
+        command
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .current_dir("/")
+            .args(["ls-remote", &self.url, "refs/heads/main"]);
+        finish(command, &["ls-remote"], &[])
+    }
+
     /// Asks the server for its `main` with `header` on every request. It needs no repository,
     /// so it works when the folder is not one.
     pub fn ask_server_with(&self, header: &str) -> Result<Run> {

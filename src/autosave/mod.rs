@@ -20,6 +20,7 @@ use serde_json::json;
 
 use crate::log;
 use crate::machines::{MAX_REPORT, MAX_SKIPPED, REPORT_HEADER, Report, Skipped};
+pub(crate) use cli::prepare;
 pub use cli::{Command, RemoteArgs, To, main};
 use folder::{Folder, Leave};
 use git::Git;

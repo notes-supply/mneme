@@ -20,7 +20,7 @@ use tempfile::TempDir;
 use crate::git::Isolation;
 
 /// A bare repository on `main` with two pages, under `root`.
-fn bare_wiki(git: &Isolation, root: &Path) -> PathBuf {
+pub fn bare_wiki(git: &Isolation, root: &Path) -> PathBuf {
     let bare = root.join("wiki.git");
     git.ok(
         root,
@@ -40,7 +40,7 @@ fn bare_wiki(git: &Isolation, root: &Path) -> PathBuf {
 }
 
 /// `mneme` with `bin` first on `PATH`.
-fn mneme(git: &Isolation, bin: &Path) -> Command {
+pub fn mneme(git: &Isolation, bin: &Path) -> Command {
     let path = std::env::join_paths(
         [bin.to_owned()]
             .into_iter()
@@ -54,7 +54,7 @@ fn mneme(git: &Isolation, bin: &Path) -> Command {
 
 /// An `ssh` that writes its arguments to `log`, one run per line, and runs the remote command on
 /// this machine, as if every host were this one.
-fn fake_ssh(bin: &Path, log: &Path) {
+pub fn fake_ssh(bin: &Path, log: &Path) {
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nfor last; do :; done\n\
          exec sh -c \"git ${{last#git-}}\"\n",
@@ -121,7 +121,7 @@ impl Service {
 }
 
 /// Writes a page dated a minute back, so that the service finds it quiet at once.
-fn write_quiet(path: &Path, text: &str) {
+pub fn write_quiet(path: &Path, text: &str) {
     fs::write(path, text).unwrap();
     File::options()
         .write(true)

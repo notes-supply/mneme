@@ -14,6 +14,7 @@ pub mod git_http;
 pub mod git_version;
 pub mod hook;
 pub mod index;
+pub mod init;
 pub mod log;
 pub mod machines;
 pub mod markdown;
@@ -31,6 +32,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Take this machine from nothing to syncing: make the wiki folder ready, then install the
+    /// autosave service as a systemd user unit and start it.
+    Init(init::Args),
     /// Serve the repository over HTTPS and the reading API.
     Serve(serve::Args),
     /// Save, sync and push a wiki folder, so that writers only edit files.
@@ -54,6 +58,7 @@ enum Hook {
 /// Runs the command named on the command line.
 pub fn main() -> ExitCode {
     let result = match Cli::parse().command {
+        Command::Init(args) => init::run(&args),
         Command::Serve(args) => tokio::runtime::Runtime::new()
             .map_err(anyhow::Error::from)
             .and_then(|runtime| runtime.block_on(serve::run(args))),

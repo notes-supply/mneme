@@ -264,11 +264,26 @@ fn serve(run: &Run) -> Result<()> {
 fn init(target: &Target) -> Result<()> {
     let config = target.config(None)?;
     git_version::check(&config.git, "mneme autosave")?;
-    ready(&Git::new(&config))
+    ready(&Git::new(&config), false)
 }
 
-/// Clones into a missing or empty folder, or checks an existing clone.
-fn ready(git: &Git) -> Result<()> {
+/// Makes the folder ready for the service of `config`, as `mneme autosave init` does, and also
+/// takes a folder of files that is not a repository yet when the remote has no `main`, for
+/// `mneme init`.
+///
+/// # Errors
+///
+/// Fails when Git is too old, or the folder cannot be made ready without deleting or
+/// overwriting a file.
+pub(crate) fn prepare(config: &Settings) -> Result<()> {
+    git_version::check(&config.git, "mneme init")?;
+    ready(&Git::new(config), true)
+}
+
+/// Clones into a missing or empty folder, or checks an existing clone. With `adopt`, a folder
+/// of files that is not a repository becomes one on `main` when the remote has no `main` yet,
+/// so that the first save commits the files and pushes them.
+fn ready(git: &Git, adopt: bool) -> Result<()> {
     let url = git.url();
     let path = git.folder();
     let empty = match fs::read_dir(path) {
@@ -289,6 +304,9 @@ fn ready(git: &Git) -> Result<()> {
         return Ok(());
     }
     if !git.git_dir().is_dir() {
+        if adopt && git.git_dir().symlink_metadata().is_err() {
+            return adopt_files(git);
+        }
         bail!(
             "{} has files and is not a Git repository. Move them aside, or make it a clone \
              of the wiki first",
@@ -311,5 +329,34 @@ fn ready(git: &Git) -> Result<()> {
         bail!("the folder is not on main. Check out main first");
     }
     log::emit("initialized", json!({ "folder": path, "cloned": false }));
+    Ok(())
+}
+
+/// Makes a folder of files a repository on `main` with `origin` set, when the remote has no
+/// `main` yet. No file is touched.
+fn adopt_files(git: &Git) -> Result<()> {
+    let url = git.url();
+    let path = git.folder();
+    let asked = git.ask_remote()?;
+    if !asked.success {
+        bail!("asking {url} for its main failed: {}", asked.error());
+    }
+    if !asked.stdout.is_empty() {
+        bail!(
+            "{} has files and is not a Git repository, and {url} already has a main. Move the \
+             files out of the folder, run mneme init again to clone the wiki into it, then move \
+             them back in, and the service saves them",
+            path.display()
+        );
+    }
+    let run = git.init_folder()?;
+    if !run.success {
+        bail!("git init failed: {}", run.error());
+    }
+    git.ok(&["remote", "add", "origin", url])?;
+    log::emit(
+        "initialized",
+        json!({ "folder": path, "cloned": false, "adopted": true }),
+    );
     Ok(())
 }
