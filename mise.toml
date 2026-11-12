@@ -16,6 +16,8 @@ rust = { version = "nightly-2026-10-28", profile = "minimal", components = "rust
 "aqua:fluxcd/flux2" = "2.8.2"
 "aqua:sigstore/cosign" = "3.1.4"
 "aqua:kubernetes/kubectl" = "1.36.3"
+# The screenshots: compress them without loss (scripts/screenshots.sh).
+"aqua:oxipng/oxipng" = "10.2.1"
 # The binaries workflow: tag a version's image (binaries.yml).
 "aqua:google/go-containerregistry" = "0.22.1"
 
@@ -58,6 +60,10 @@ run = [
 [tasks.image]
 description = "Build the server's image and check it with a real clone and push and a Trivy scan"
 run = "scripts/image.sh"
+
+[tasks.screenshots]
+description = "Make the README's screenshots in docs/images from a real run with invented content"
+run = "scripts/screenshots.sh"
 
 [tasks.gate]
 description = "Everything that proves the repository is good"

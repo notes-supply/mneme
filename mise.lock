@@ -76,6 +76,16 @@ checksum_source = "mise-versions"
 url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-x86_64-unknown-linux-gnu.tar.gz"
 url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/679066447"
 
+[[tools."aqua:oxipng/oxipng"]]
+version = "10.2.1"
+backend = "aqua:oxipng/oxipng"
+specifiers = ["10.2.1"]
+
+[tools."aqua:oxipng/oxipng"."platforms.linux-x64"]
+checksum = "sha256:46e3c4beb9aae57290ad809dd3374b07153579d3322a3778c53900633618b7c6"
+url = "https://github.com/oxipng/oxipng/releases/download/v10.2.1/oxipng-10.2.1-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/oxipng/oxipng/releases/assets/541676037"
+
 [[tools."aqua:rhysd/actionlint"]]
 version = "1.7.12"
 backend = "aqua:rhysd/actionlint"
