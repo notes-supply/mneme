@@ -1,22 +1,23 @@
 # Reading API
 
-Every reading route is `GET`, lives under `/v1`, and answers with JSON. By default there is no authentication at this layer; the network keeps it private. `mneme serve --repo` also has [editing routes](#editing), which commit a change to `main` and always ask for a token that may write. The machines' reports, which `/v1/machines` lists, arrive on the Git routes with a machine's token, as described [at the end](#reports).
+Every reading route is `GET`, lives under `/v1`, and answers with JSON, except [`/v1/raw`](#get-v1rawpath), which answers with a file's bytes. By default there is no authentication at this layer; the network keeps it private. `mneme serve --repo` also has [editing routes](#editing), which commit a change to `main` and always ask for a token that may write. The machines' reports, which `/v1/machines` lists, arrive on the Git routes with a machine's token, as described [at the end](#reports).
 
 `mneme serve --repo` with `--private-api` asks every `/v1` route for `Authorization: Bearer <token>`, with any token from the tokens file, read-only or not. A request without one, or with one the server does not know, is `401` with `WWW-Authenticate: Bearer` and no body, as on the Git routes, whatever route it names. `/healthz` stays open.
 
 `mneme serve --folder DIR` serves the same routes for a clone on the same machine, from `main` in `DIR/.git`, which it follows. It listens on a loopback address only, `127.0.0.1:8081` unless `--addr` says otherwise, and answers `421` with `{ "error" }` to any request whose `Host` is not `localhost`, `127.0.0.1` or `[::1]`, with any port. There `/v1/machines` is always empty, and there are no Git routes.
 
-Each route has one example response in `tests/fixtures/api/`. The tests check every real response against the shape of its example, both ways, so the frontend can test against the same files. To write them again from a real server, run `MNEME_WRITE_EXAMPLES=1 cargo nextest run every_route`.
+Each route that answers with JSON has one example response in `tests/fixtures/api/`. The tests check every real response against the shape of its example, both ways, so the frontend can test against the same files. To write them again from a real server, run `MNEME_WRITE_EXAMPLES=1 cargo nextest run every_route`.
 
 ## Conventions
 
 - **Times** are author times, in seconds since the Unix epoch.
 - **Commits** are full 40-character ids of commits on `main`.
 - **Page ids** are 16 hexadecimal characters. A page keeps its id across renames. A page created again at the path of a deleted one has a new id.
+- **Files.** A page is a `.md` file. A file is any other regular file of the wiki, executable or not, such as an image, a PDF or a zip. A symlink or a submodule is neither. Files have no ids: a file is named by its path. A file whose path is not UTF-8 is in none of the files routes, though Git stores and syncs it.
 - **Versions.** A version is a commit that changed a page's text. Events also include renames that keep the text and deletions. Those have `"version": false`.
 - **Paging.** `limit` defaults to 50 and is capped at 500. `offset` defaults to 0. A paged answer has `total`, the number of items across all pages.
-- **ETag.** Every response of a reading route has a strong `ETag`, the hash of its body. A request with a matching `If-None-Match` gets `304` with no body.
-- **Errors** are `{ "error": "..." }`: `400` for parameters that do not parse and for a search that cannot be read, `404` for an unknown route, page, commit or path, or a page with no text at a commit.
+- **ETag.** Every response of a reading route has a strong `ETag`: the hash of its body, or for `/v1/raw` the id of the file's bytes. A request with a matching `If-None-Match` gets `304` with no body.
+- **Errors** are `{ "error": "..." }`: `400` for parameters that do not parse and for a search that cannot be read, `404` for an unknown route, page, file, commit or path, or a page with no text at a commit, and `416` for a range that holds none of a file's bytes.
 
 ## `GET /v1/status`
 
@@ -117,6 +118,76 @@ Visible text is what a reader sees: link text but not link targets, code, and no
 
 Example: [`search.json`](../tests/fixtures/api/search.json).
 
+## `GET /v1/files`
+
+Live files, as `{ "total", "files": [File] }`. Pages are not among them.
+
+| Parameter | Meaning |
+| --- | --- |
+| `under` | only files inside this folder, at any depth: `under=brand` has `brand/logo.svg` and `brand/print/a4.pdf`, and not `brandy.txt` |
+| `q` | words separated by spaces, each of which must be in the path, without case |
+| `sort` | `path` (the default), `updated` or `size` |
+| `order` | `asc` or `desc`. The default is `asc` for `path` and `desc` for the rest |
+| `limit`, `offset` | paging |
+
+A `File` has `path`, `size` in bytes, `type` (the `Content-Type` that [`/v1/raw`](#get-v1rawpath) sends its bytes with), `created`, `updated` (the time of its newest event), `versions` (how many events changed its bytes, the creation included), `author` and `commit` (of its newest event) and `deleted` (the time of the deletion, or `null`). A deleted file keeps the path and the size it last had. Paths sort by their bytes, so `Zebra.png` comes before `apple.png`.
+
+Example: [`files.json`](../tests/fixtures/api/files.json).
+
+## `GET /v1/files/{path}`
+
+One file and its events, newest first, as `{ "file": File, "total", "events": [FileEvent] }`, with `limit` and `offset`. The path may hold slashes and must match exactly.
+
+It is the live file at the path. When there is none, it is the file most recently deleted at that path, with `deleted` set. It is `404` when no file is at the path and none was deleted there, which is also so for the old path of a file that moved away, and for a page.
+
+A `FileEvent` has `commit`, `path` (after the event), `time`, `author`, `kind` (`created`, `edited`, `renamed` or `deleted`), `from` (the old path, only for `renamed`) and `size` (after the event, so `0` for a deletion).
+
+A file is renamed only when the very same bytes leave one path and come to another in one commit, and it keeps its history then. A move that also changes the bytes is a deletion at the old path and a creation at the new one. A file created again at the path of a deleted one is a new file.
+
+Example: [`file.json`](../tests/fixtures/api/file.json).
+
+## `GET /v1/changes/files`
+
+Events across all files, newest first, as `{ "total", "events": [FileEvent] }`. Parameters are `limit`, `offset`, `since` and `before`, as for [`/v1/changes`](#get-v1changes), which stays pages only.
+
+Example: [`file-changes.json`](../tests/fixtures/api/file-changes.json).
+
+## `GET /v1/raw/{path}`
+
+The bytes of the file at `path` on `main`, a page included. The path may hold slashes and must match exactly. `?at=<commit>` gives the bytes the path had in that commit's tree, so a file that has moved or been deleted since is still there at a commit that had it. `HEAD` answers with the same headers and no body.
+
+| Status | When |
+| --- | --- |
+| `200` | the whole file |
+| `206` | one range of it |
+| `304` | `If-None-Match` names its `ETag` |
+| `400` | `at` is not a full commit id |
+| `404` | nothing is at the path, the commit is unknown or not on `main`, or the path held a folder, a symlink or a submodule |
+| `416` | the range holds none of the file's bytes; `Content-Range` is `bytes */<size>` |
+| `503` | `mneme serve --repo` only: the file is over 10 MiB and stored as a delta of another, which the server would have to hold in memory whole; `git repack -a -d -F` in its repository stores it whole |
+
+An error's body is `{ "error" }`. A file is sent as it is read from the repository, so a large one takes no more of the server's memory than a small one. The server's push check keeps a large file from arriving as a delta and its Git never makes one, so the `503` needs a repository that was changed by hand. `mneme serve --folder` reads such a file whole and sends it.
+
+- **`Content-Length`** is always there.
+- **`ETag`** is the id Git gives the bytes, in quotes. It is strong: the same bytes have the same tag at any path and any commit.
+- **`Range`.** `Accept-Ranges` is `bytes`. One range, `bytes=10-19`, `bytes=10-` or the last bytes as `bytes=-10`, gives `206` with `Content-Range`. Several ranges in one request, or a range that cannot be read, are answered with the whole file. With `If-Range`, the range is sent only when it names the `ETag`, and the whole file otherwise. Git stores a file as one compressed stream, so a range costs reading the file up to where the range starts.
+- **`Cache-Control`.** With `at` the bytes can never change: `max-age=31536000, immutable`. Without it, `no-cache`, so a client asks again with the `ETag`. Under `--private-api` both start with `private`.
+- **`Content-Type`** comes from the path's extension alone, never from the bytes.
+- **`Content-Disposition`** is `inline` or `attachment`, and always has the file's name. A name that is not plain ASCII is given twice, as `filename="_rets logga.png"; filename*=UTF-8''%C3%85rets%20logga.png`.
+- **`X-Content-Type-Options: nosniff`** and a **`Content-Security-Policy`** are on every answer, an error included.
+
+Only kinds that cannot run as a document in a browser are shown in place:
+
+| Extensions | `Content-Type` | `Content-Disposition` |
+| --- | --- | --- |
+| `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.avif`, `.svg` | the image's own, such as `image/png` and `image/svg+xml` | `inline` |
+| `.pdf` | `application/pdf` | `inline` |
+| `.mp3`, `.m4a`, `.aac`, `.ogg`, `.oga`, `.opus`, `.wav`, `.flac`, `.weba`, `.mp4`, `.webm`, `.ogv`, `.mov` | the sound's or the film's own, such as `audio/mpeg` and `video/mp4` | `inline` |
+| `.txt`, `.md`, `.csv`, `.tsv`, `.json`, `.yaml`, `.yml`, `.toml`, `.log`, `.ini`, `.conf` and the like | `text/plain; charset=utf-8` | `inline` |
+| everything else: `.html`, `.xml`, `.js`, `.css`, `.zip`, a file with no extension | `application/octet-stream` | `attachment` |
+
+Nothing is ever sent as `text/html`. The policy is `default-src 'none'; style-src 'unsafe-inline'; sandbox`: nothing may load, no script may run, and the file is in an origin of its own, so an SVG opened in a tab can do nothing to the site that linked it. Inline styles alone are allowed, since they can neither load nor run anything and an SVG is drawn with them. A PDF gets the same policy without `sandbox` ([decisions.md](decisions.md#files) says why).
+
 ## `GET /v1/machines`
 
 Every machine in the tokens file, by name, as `{ "total", "machines": [Machine] }`. The server keeps this in `mneme/machines.json` inside the bare repository, so it survives a restart. A change is written within 3 seconds and at a clean stop, so a crash loses at most the last few seconds.
@@ -165,7 +236,7 @@ An autosave service reports its state in a `Mneme-Report` header on a Git reques
 | `a submodule or nested repository` | is a folder with a Git repository of its own; its path ends in `/` |
 | `a path named .git` | has `.git` in any case as one of its path's parts |
 | `a page over 1 MiB` | is a `.md` file over 1 MiB |
-| `a file over 10 MiB` | is any other file over 10 MiB |
+| `a file over 100 MiB` | is any other file over 100 MiB |
 | `a name Git will not store` | is new and has a name Git refuses, such as `git~1`, which Windows reads as `.git` |
 
 The server stores the report and answers the Git request as usual. A request that carries a report does not change `seen`. A header over 4 KiB is `413`, one that is not base64 or not JSON is `400`, and a report with missing or unknown fields or bad values is `422`, each with `{ "error" }` and without running the Git request. A request without the right token is `401` with no body, whatever it carries.

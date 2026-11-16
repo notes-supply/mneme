@@ -47,6 +47,8 @@ fn clone_commit_push_and_read_the_change() {
     assert_eq!(config("receive.denyDeletes").trim(), "true");
     assert_eq!(config("receive.fsckObjects").trim(), "true");
     assert_eq!(config("http.receivepack").trim(), "true");
+    assert_eq!(config("core.bigFileThreshold").trim(), "1048576");
+    assert_eq!(config("receive.maxInputSize").trim(), "1073741824");
     let hook = std::fs::metadata(repo.join("hooks/pre-receive")).unwrap();
     assert_eq!(hook.permissions().mode() & 0o111, 0o111);
 
@@ -91,11 +93,43 @@ fn a_pushed_history_indexes_as_a_fresh_build_does() {
     assert!(ok, "{said}");
     assert_versions_match_git(&server, &work);
     let fresh = server.again(&git);
-    for path in ["/v1/pages?deleted=true", "/v1/changes?limit=500"] {
+    for path in [
+        "/v1/pages?deleted=true",
+        "/v1/changes?limit=500",
+        "/v1/files",
+        "/v1/changes/files",
+    ] {
         assert_eq!(server.get(path).body, fresh.get(path).body, "{path}");
     }
     let alpha = live_page(&server, "greek/alpha.md");
     assert_eq!(events(&server, &alpha).len(), 4);
+    let readme = server.json("/v1/files/notes/readme.txt");
+    assert_eq!(readme["file"]["versions"], 2, "one version in each push");
+}
+
+#[test]
+fn files_pushed_one_commit_at_a_time_index_as_a_fresh_build_does() {
+    let git = Isolation::new();
+    let server = Server::empty(&git);
+    let work = crate::files::brand();
+    work.ok(&["remote", "add", "origin", &server.git_url()]);
+    work.ok(&["config", "http.extraHeader", AUTHORIZATION]);
+    for behind in (0..5).rev() {
+        let (ok, said) = work.push(&["origin", &format!("main~{behind}:refs/heads/main")]);
+        assert!(ok, "{said}");
+    }
+    let fresh = server.again(&git);
+    let of_clone = Server::of(&work);
+    for path in [
+        "/v1/files",
+        "/v1/changes/files",
+        "/v1/files/brand/archive/Kit%202026.zip",
+        "/v1/files/notes/readme.txt",
+    ] {
+        let pushed = server.get(path).body;
+        assert_eq!(pushed, fresh.get(path).body, "{path}");
+        assert_eq!(pushed, of_clone.get(path).body, "{path}");
+    }
 }
 
 #[test]
@@ -230,21 +264,56 @@ fn a_page_over_one_mebibyte_with_a_name_git_quotes_is_refused() {
     );
 }
 
+/// A file over 10 MiB whose bytes are the same block over and over, with `tail` at its end.
+fn repetitive(tail: &str) -> Vec<u8> {
+    let block = crate::files::bytes(8, 4096);
+    let mut file: Vec<u8> = block
+        .iter()
+        .copied()
+        .cycle()
+        .take((10 << 20) + 4096)
+        .collect();
+    file.extend_from_slice(tail.as_bytes());
+    file
+}
+
+/// Stock Git stores the second version of a large file as a delta of the first, and the server
+/// keeps a pack of a hundred objects or more as it came. Reading such a file back would mean
+/// rebuilding it in memory, so the push check refuses it and says what to set.
 #[test]
-fn a_file_over_ten_mebibytes_is_refused() {
+fn a_large_file_pushed_as_a_delta_is_refused_until_git_is_told_to_store_it_whole() {
     let (server, work) = wiki();
-    work.write("huge.bin", &"a".repeat((10 << 20) + 1));
-    work.commit("Huge");
+    work.write_bytes("brand/film.bin", &repetitive("the first cut"));
+    work.commit("Add a film");
+    let (ok, said) = work.push(&["origin", "main"]);
+    assert!(ok, "a first version has nothing to be a delta of: {said}");
+    let second = repetitive("the second cut");
+    work.write_bytes("brand/film.bin", &second);
+    for page in 0..100 {
+        work.write(&format!("notes/{page}.md"), &format!("# Note {page}\n"));
+    }
+    work.commit("Cut the film again, and write a hundred notes");
     assert_refused(
         &server,
         &work,
         &["origin", "main"],
-        "has a file over 10 MiB at huge.bin",
+        "brand/film.bin is over 10 MiB and the push stores it as a delta of another file",
     );
-    work.write("huge.bin", &"a".repeat(10 << 20));
-    work.ok(&["commit", "-q", "-a", "--amend", "-m", "Ten MiB"]);
+    assert_eq!(server.get("/healthz").body, "ok");
+
+    work.ok(&["config", "core.bigFileThreshold", "1m"]);
+    work.ok(&["repack", "-q", "-a", "-d", "-F"]);
     let (ok, said) = work.push(&["origin", "main"]);
-    assert!(ok, "a file of exactly 10 MiB is stored: {said}");
+    assert!(
+        ok,
+        "the same commit goes through once it is stored whole: {said}"
+    );
+    let raw = server.get("/v1/raw/brand/film.bin");
+    assert_eq!(raw.status, 200);
+    assert!(raw.bytes == second, "the second cut is read back");
+    let film = server.json("/v1/files/brand/film.bin");
+    assert_eq!(film["file"]["versions"], 2);
+    assert_eq!(film["file"]["size"], second.len());
 }
 
 #[test]
@@ -339,7 +408,7 @@ fn a_gzip_request_body_is_read() {
 }
 
 #[test]
-fn a_body_over_64_mib_is_refused() {
+fn a_body_that_declares_more_than_the_largest_pack_is_refused_before_git_runs() {
     let (server, _work) = wiki();
     let addr = server.url.trim_start_matches("http://");
     let mut stream = TcpStream::connect(addr).unwrap();
@@ -348,7 +417,7 @@ fn a_body_over_64_mib_is_refused() {
         "POST /git/wiki.git/git-receive-pack HTTP/1.1\r\nHost: {addr}\r\n\
          Authorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\
          Content-Type: application/x-git-receive-pack-request\r\n\r\n",
-        (64 << 20) + 1
+        (1_u64 << 30) + (1 << 20) + 1
     )
     .unwrap();
     let mut status = [0; 12];
@@ -356,18 +425,29 @@ fn a_body_over_64_mib_is_refused() {
     assert_eq!(&status, b"HTTP/1.1 413");
 }
 
+/// The server's own limit is 1 GiB, which no test sends. Git keeps it, so it is lowered here
+/// in the repository, and the pack is of bytes that do not compress, larger than what the
+/// connection holds unread, so that the client is still sending when Git gives up.
 #[test]
-fn a_streamed_push_over_64_mib_fails_and_the_server_stays_healthy() {
+fn a_pack_over_the_limit_is_refused_by_git_with_a_reason_and_the_server_stays_healthy() {
     let (server, work) = wiki();
-    let before = head(&server);
-    work.write("big.bin", &"a".repeat((64 << 20) + (1 << 20)));
-    work.ok(&["config", "core.compression", "0"]);
-    work.ok(&["add", "big.bin"]);
-    work.ok(&["commit", "-q", "-m", "Add a large file"]);
-    let (ok, said) = work.push(&["origin", "main"]);
-    assert!(!ok, "the push was accepted: {said}");
-    assert_eq!(head(&server), before, "main did not move");
-    server.log_with("the request body is over 67108864 bytes");
+    work.git.ok(
+        server.repo(),
+        &["--git-dir", ".", "config", "receive.maxInputSize", "100000"],
+    );
+    work.write_bytes("big.bin", &crate::files::bytes(9, 24 << 20));
+    work.commit("Add a large file");
+    assert_refused(
+        &server,
+        &work,
+        &["origin", "main"],
+        "remote: fatal: pack exceeds maximum allowed size",
+    );
+    let (_, said) = work.push(&["origin", "main"]);
+    assert!(
+        said.contains("[remote rejected]") && !said.contains("hung up"),
+        "the push is refused, not cut off: {said}"
+    );
 
     assert_eq!(server.get("/healthz").body, "ok");
     work.ok(&["reset", "-q", "--hard", "HEAD~"]);

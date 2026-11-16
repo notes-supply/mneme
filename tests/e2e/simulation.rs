@@ -1038,7 +1038,7 @@ impl Sim {
             2 => {
                 let path = format!("huge-{token}.bin");
                 sparse(&folder.join(&path), MAX_FILE + 1);
-                (path, "a file over 10 MiB")
+                (path, "a file over 100 MiB")
             }
             3 => {
                 let path = format!("nested-{token}/");

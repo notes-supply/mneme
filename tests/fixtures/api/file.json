@@ -1,0 +1,33 @@
+{
+  "events": [
+    {
+      "author": "Writer",
+      "commit": "1b6b2d8187460973c73127a3e37a7e2cab811950",
+      "from": "brand/kit.zip",
+      "kind": "renamed",
+      "path": "brand/archive/Kit 2026.zip",
+      "size": 3000,
+      "time": 1788222600
+    },
+    {
+      "author": "Writer",
+      "commit": "a75f4a67d9148128bb1b4cc2f494d997cef810e7",
+      "kind": "created",
+      "path": "brand/kit.zip",
+      "size": 3000,
+      "time": 1788221400
+    }
+  ],
+  "file": {
+    "author": "Writer",
+    "commit": "1b6b2d8187460973c73127a3e37a7e2cab811950",
+    "created": 1788221400,
+    "deleted": null,
+    "path": "brand/archive/Kit 2026.zip",
+    "size": 3000,
+    "type": "application/octet-stream",
+    "updated": 1788222600,
+    "versions": 1
+  },
+  "total": 2
+}

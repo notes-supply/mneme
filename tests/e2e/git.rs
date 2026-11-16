@@ -182,6 +182,12 @@ impl Work {
         fs::write(file, text).unwrap();
     }
 
+    pub fn write_bytes(&self, path: &str, bytes: &[u8]) {
+        let file = self.file(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, bytes).unwrap();
+    }
+
     pub fn remove(&self, path: &str) {
         fs::remove_file(self.file(path)).unwrap();
     }

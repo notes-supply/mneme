@@ -1,11 +1,12 @@
 //! `mneme hook pre-receive`, the push check. Git runs it with the pushed objects in a
 //! quarantine that plain `git` commands see, before any ref moves.
 
+use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write as _};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
 
@@ -27,6 +28,14 @@ pub enum Refusal {
         path: String,
         broken: Broken,
     },
+    /// The server reads a file over [`rules::MAX_WHOLE`] only as a stream, and a delta can only
+    /// be rebuilt in memory.
+    #[error(
+        "{0} is over 10 MiB and the push stores it as a delta of another file, which the server \
+         would have to hold in memory to read; set core.bigFileThreshold to 1m in this clone, \
+         run git repack -a -d -F there, and push again"
+    )]
+    Delta(String),
 }
 
 /// Installs the hook into the bare repository at `repo`, as a script that runs this binary.
@@ -80,14 +89,18 @@ pub fn check(updates: impl BufRead) -> Result<Result<(), Refusal>> {
         if new.bytes().all(|b| b == b'0') {
             return Ok(Err(Refusal::Deletion));
         }
-        let listing = git(&["rev-list", "--parents", new, "--not", "--all"])?;
+        let listing = git(&["rev-list", "--parents", new, "--not", "--all"], b"")?;
+        let mut large = BTreeMap::new();
         for (id, parents) in commits(&listing) {
             if parents > 1 {
                 return Ok(Err(Refusal::Merge(id)));
             }
-            if let Err(refusal) = check_tree(&id)? {
+            if let Err(refusal) = check_tree(&id, &mut large)? {
                 return Ok(Err(refusal));
             }
+        }
+        if let Some(path) = stored_as_delta(new, &large)? {
+            return Ok(Err(Refusal::Delta(path)));
         }
     }
     Ok(Ok(()))
@@ -106,9 +119,11 @@ fn commits(listing: &[u8]) -> Vec<(String, usize)> {
         .collect()
 }
 
-fn check_tree(commit: &str) -> Result<Result<(), Refusal>> {
-    let listing = git(&["ls-tree", "-r", "-t", "-z", "-l", commit])?;
-    for (path, entry) in entries(&listing)? {
+/// Checks every path of a commit against the rules, and adds each file over
+/// [`rules::MAX_WHOLE`] to `large`, by its blob.
+fn check_tree(commit: &str, large: &mut BTreeMap<String, String>) -> Result<Result<(), Refusal>> {
+    let listing = git(&["ls-tree", "-r", "-t", "-z", "-l", commit], b"")?;
+    for Listed { path, entry, blob } in entries(&listing)? {
         if let Some(broken) = rules::check(path.as_bytes(), entry) {
             return Ok(Err(Refusal::Broken {
                 commit: commit.to_owned(),
@@ -116,14 +131,60 @@ fn check_tree(commit: &str) -> Result<Result<(), Refusal>> {
                 broken,
             }));
         }
+        if matches!(entry, Entry::File(size) if size > rules::MAX_WHOLE) {
+            large.insert(blob, path);
+        }
     }
     Ok(Ok(()))
+}
+
+/// The path of a file among `large`, by blob, that this push brings and stores as a delta. The
+/// server tells its own Git never to store a blob over a page's size as one, and the autosave
+/// service tells its Git the same, but a push made by hand with Git's own settings can hold a
+/// second version of a large file as a delta of the first. Git keeps a pack of a hundred objects
+/// or more as it came, and such a blob could then only be read back by rebuilding it in memory.
+fn stored_as_delta(new: &str, large: &BTreeMap<String, String>) -> Result<Option<String>> {
+    if large.is_empty() {
+        return Ok(None);
+    }
+    let pushed = git(&["rev-list", "--objects", new, "--not", "--all"], b"")?;
+    let pushed = String::from_utf8_lossy(&pushed);
+    let mut blobs = String::new();
+    for id in pushed.lines().filter_map(|line| line.split(' ').next()) {
+        if large.contains_key(id) {
+            blobs.push_str(id);
+            blobs.push('\n');
+        }
+    }
+    if blobs.is_empty() {
+        return Ok(None);
+    }
+    let stored = git(
+        &["cat-file", "--batch-check=%(objectname) %(deltabase)"],
+        blobs.as_bytes(),
+    )?;
+    Ok(String::from_utf8_lossy(&stored).lines().find_map(|line| {
+        let (blob, base) = line.split_once(' ')?;
+        base.bytes()
+            .any(|b| b != b'0')
+            .then(|| large.get(blob).cloned())
+            .flatten()
+    }))
+}
+
+/// One path of a tree listing.
+#[derive(Debug, PartialEq, Eq)]
+struct Listed {
+    path: String,
+    entry: Entry,
+    /// The object the path holds, as Git names it.
+    blob: String,
 }
 
 /// Each path of a `git ls-tree -r -t -z -l` listing, with what it holds. The long listing gives
 /// each path as it is, where `--format`'s `%(path)` quotes one with a tab, a newline or a byte
 /// over 0x7f even under `-z`, so that `café.md` would not end in `.md`.
-fn entries(listing: &[u8]) -> Result<Vec<(String, Entry)>> {
+fn entries(listing: &[u8]) -> Result<Vec<Listed>> {
     listing
         .split(|&b| b == 0)
         .filter(|entry| !entry.is_empty())
@@ -132,23 +193,38 @@ fn entries(listing: &[u8]) -> Result<Vec<(String, Entry)>> {
             let Some((facts, path)) = entry.split_once('\t') else {
                 bail!("unexpected ls-tree entry {entry:?}");
             };
-            let held = match facts.split_whitespace().collect::<Vec<_>>()[..] {
-                ["120000", "blob", _, _] => Entry::Symlink,
-                [_, "blob", _, size] => Entry::File(size.parse()?),
-                [_, "tree", _, _] => Entry::Folder,
-                [_, "commit", _, _] => Entry::Repository,
+            let (held, blob) = match facts.split_whitespace().collect::<Vec<_>>()[..] {
+                ["120000", "blob", blob, _] => (Entry::Symlink, blob),
+                [_, "blob", blob, size] => (Entry::File(size.parse()?), blob),
+                [_, "tree", blob, _] => (Entry::Folder, blob),
+                [_, "commit", blob, _] => (Entry::Repository, blob),
                 _ => bail!("unexpected ls-tree entry {entry:?}"),
             };
-            Ok((path.to_owned(), held))
+            Ok(Listed {
+                path: path.to_owned(),
+                entry: held,
+                blob: blob.to_owned(),
+            })
         })
         .collect()
 }
 
-fn git(args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("git")
+/// Runs `git` with `input` on standard input and returns what it printed.
+fn git(args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+    let mut child = Command::new("git")
         .args(args)
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("running git")?;
+    let mut stdin = child.stdin.take().context("no stdin")?;
+    // Git answers as it reads, so the input is written while its output is read.
+    let output = std::thread::scope(|scope| {
+        scope.spawn(move || stdin.write_all(input));
+        child.wait_with_output()
+    })
+    .context("running git")?;
     if !output.status.success() {
         bail!(
             "git {} failed: {}",
@@ -215,7 +291,16 @@ mod tests {
         ]
         .map(|(path, entry)| (path.to_owned(), entry));
         for (version, _, ls_tree) in GITS {
-            assert_eq!(entries(ls_tree).unwrap(), expected, "Git {version}");
+            let listed = entries(ls_tree).unwrap();
+            assert!(
+                listed.iter().all(|listed| listed.blob.len() == 40),
+                "Git {version}: every entry names its object: {listed:?}"
+            );
+            let read: Vec<_> = listed
+                .into_iter()
+                .map(|listed| (listed.path, listed.entry))
+                .collect();
+            assert_eq!(read, expected, "Git {version}");
         }
     }
 }

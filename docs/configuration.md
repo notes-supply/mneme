@@ -84,7 +84,9 @@ A machine that only keeps a copy, such as a mirror or a backup, runs the service
 - A change is saved once every changed file has been still for 15 seconds, then pushed. The service fetches right after, and every 30 seconds.
 - When two machines change the same lines, the later one keeps its own text and marks its commit with an `Overlap:` trailer. The other text stays in the history.
 - It waits while the folder is in the middle of a Git operation it did not start, and stops saving when a save would delete most pages.
-- A file the server would refuse, such as a symlink, a page over 1 MiB or any file over 10 MiB, stays in the folder and out of every save, and the service reports it.
+- Files that are not pages, such as images, PDFs and zips, are saved and synced like pages, up to 100 MiB each. That is also the largest file GitHub takes, so the same wiki syncs to a plain Git host. Every clone keeps every version of every file.
+- A file the server would refuse, such as a symlink, a page over 1 MiB or any file over 100 MiB, stays in the folder and out of every save, and the service reports it.
+- A server takes at most 1 GiB in one push. That is the pack Git sends, compressed, and it holds every commit the server does not have yet, not only the last save: several saves made offline go in one push, and files that do not compress, such as zips, photos and films, count at about their full size. A push over it is refused with Git's reason, `pack exceeds maximum allowed size`, and the service reports `blocked` with that reason and waits, and sends nothing again until its head changes. Most often the folder took in many large files at once, or saved them over a long time offline ([decisions.md](decisions.md#git-over-https) says how to get out).
 - Git runs without the machine's own Git configuration, so ignores belong in the wiki's `.gitignore`.
 - It never waits for a person: Git may not prompt, and a wrong token fails at once.
 

@@ -23,7 +23,7 @@
       "skipped": [
         {
           "path": "notes/scan.pdf",
-          "reason": "a file over 10 MiB"
+          "reason": "a file over 100 MiB"
         }
       ],
       "skipped_more": 0,

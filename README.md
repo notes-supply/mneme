@@ -14,6 +14,7 @@ Mneme is a Markdown wiki in Git, made for AI agents and the people who work with
 ## Features
 
 - **Just files.** Anyone or anything that can write a file can write the wiki.
+- **Files beside the pages.** Images, PDFs and zips up to 100 MiB are saved, versioned and served like the pages.
 - **Saved in seconds.** Each machine commits what has been still for 15 seconds, and pushes it.
 - **No conflicts to resolve.** On the same lines the later edit wins, marked `Overlap:`, and history keeps the other.
 - **Any Git remote.** A Git host over HTTPS, a bare repository by path, or a Mneme server.

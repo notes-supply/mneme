@@ -1,6 +1,7 @@
 //! The autosave service's refusals, one at a time, with a fake clock.
 
 use std::fs::{self, File};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -117,9 +118,13 @@ impl Wiki {
     }
 
     fn write(&self, path: &str, text: &str) {
+        self.write_bytes(path, text.as_bytes());
+    }
+
+    fn write_bytes(&self, path: &str, bytes: &[u8]) {
         let file = self.path().join(path);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
-        fs::write(&file, text).unwrap();
+        fs::write(&file, bytes).unwrap();
         File::options()
             .write(true)
             .open(&file)
@@ -338,6 +343,137 @@ fn the_service_reports_its_state_with_a_git_request() {
     }
 }
 
+/// A file that is not a page and is larger than one, so that Git streams it, goes the whole way:
+/// saved, pushed, read back from the server as it is, and saved again when it changes.
+#[test]
+fn a_file_larger_than_a_page_is_saved_pushed_and_read_back_as_it_is() {
+    let mut wiki = Wiki::new();
+    let first = crate::files::bytes(10, 3 << 20);
+    wiki.write_bytes("brand/kit.zip", &first);
+    assert_eq!(wiki.tick(), Outcome::Pushed);
+    let raw = wiki.server.get("/v1/raw/brand/kit.zip");
+    assert!(
+        raw.bytes == first,
+        "the server has the file as it was saved"
+    );
+    let mut second = first;
+    second[1 << 20..(1 << 20) + 7].copy_from_slice(b"changed");
+    wiki.write_bytes("brand/kit.zip", &second);
+    assert_eq!(wiki.tick(), Outcome::Pushed);
+    let raw = wiki.server.get("/v1/raw/brand/kit.zip");
+    assert!(raw.bytes == second, "the server has the changed file");
+    let kit = wiki.server.json("/v1/files/brand/kit.zip");
+    assert_eq!(kit["file"]["versions"], 2);
+    assert_eq!(kit["file"]["size"], 3 << 20);
+    assert_eq!(kit["file"]["author"], MACHINES[1].0);
+    assert_eq!(wiki.tick(), Outcome::Idle);
+    assert_eq!(wiki.reported()["skipped"], json!([]));
+}
+
+/// Every Git command of the service is told to stream a blob larger than a page, so that a
+/// large file is never held in memory or compared with another to store it as a delta.
+#[test]
+fn the_service_tells_git_to_stream_what_is_larger_than_a_page() {
+    let dir = TempDir::new().unwrap();
+    let program = dir.path().join("recording-git");
+    let record = dir.path().join("settings");
+    fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nenv | grep '^GIT_CONFIG_' >> '{}'\nexec git \"$@\"\n",
+            record.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut wiki = Wiki::with_git(program, Some(dir));
+    wiki.write("page-1.md", "# Page 1\n\nan edit\n");
+    assert_eq!(wiki.tick(), Outcome::Pushed);
+    let settings = fs::read_to_string(record).unwrap();
+    let key = settings
+        .lines()
+        .find_map(|line| line.strip_suffix("=core.bigFileThreshold"))
+        .expect("the setting is given");
+    let value = key.replace("KEY", "VALUE");
+    assert!(
+        settings
+            .lines()
+            .any(|line| line == format!("{value}=1048576")),
+        "{settings}"
+    );
+    let commands = settings.matches("=core.bigFileThreshold").count();
+    assert_eq!(
+        commands,
+        settings.matches("GIT_CONFIG_COUNT=").count(),
+        "every command gets it"
+    );
+}
+
+/// A pack the server will never take must not be sent again and again. Git refuses a pack over
+/// `receive.maxInputSize` while the service is still sending it. The server reads the rest, so
+/// that the service gets Git's reason instead of a broken connection, which it would take for a
+/// server it cannot reach and try again on every tick.
+#[test]
+fn a_pack_the_server_will_not_take_blocks_the_service_with_gits_reason_and_is_not_sent_again() {
+    let mut wiki = Wiki::new();
+    wiki.git.ok(
+        wiki.server.repo(),
+        &["--git-dir", ".", "config", "receive.maxInputSize", "100000"],
+    );
+    wiki.write_bytes("brand/film.bin", &crate::files::bytes(11, 24 << 20));
+    let outcome = wiki.tick();
+    let Outcome::Blocked(reason) = &outcome else {
+        panic!("the tick was {outcome:?}");
+    };
+    assert!(
+        reason.contains("pack exceeds maximum allowed size"),
+        "{reason}"
+    );
+    let reported = wiki.reported();
+    assert_eq!(reported["state"], "blocked");
+    assert_eq!(reported["detail"], reason.as_str());
+    // How many requests to push the server got so far. A request to a path of its own marks the
+    // place in the server's log, which the thread that reads it may not have reached yet.
+    let sent = |wiki: &Wiki, marker: &str| {
+        wiki.server.get(&format!("/v1/{marker}"));
+        wiki.server
+            .log_with(marker)
+            .iter()
+            .filter(|line| line.contains(r#""path":"/git/wiki.git/git-receive-pack""#))
+            .count()
+    };
+    let before = sent(&wiki, "after-the-first-tick");
+    for _ in 0..3 {
+        assert_eq!(wiki.tick(), outcome, "the same reason on every tick");
+    }
+    assert_eq!(
+        sent(&wiki, "after-three-more-ticks"),
+        before,
+        "the pack is not sent again while nothing changed"
+    );
+
+    wiki.git.ok(
+        wiki.server.repo(),
+        &[
+            "--git-dir",
+            ".",
+            "config",
+            "receive.maxInputSize",
+            "1073741824",
+        ],
+    );
+    wiki.write(
+        "page-1.md",
+        "# Page 1\n\nan edit after the limit was raised\n",
+    );
+    assert_eq!(wiki.tick(), Outcome::Pushed, "a new head is pushed");
+    assert_eq!(wiki.server_head(), wiki.head());
+    assert_eq!(
+        wiki.server.get("/v1/raw/brand/film.bin").bytes.len(),
+        24 << 20
+    );
+}
+
 /// A file of `size` bytes that takes no room on disk.
 fn sparse(path: &Path, size: u64) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -360,7 +496,7 @@ fn write_bad_files(wiki: &Wiki) -> Vec<(String, &'static str)> {
     let mut bad = vec![
         (".GIT/config".to_owned(), "a path named .git"),
         ("big.md".to_owned(), "a page over 1 MiB"),
-        ("huge.bin".to_owned(), "a file over 10 MiB"),
+        ("huge.bin".to_owned(), "a file over 100 MiB"),
         ("link.md".to_owned(), "a symlink"),
         ("nested/".to_owned(), "a submodule or nested repository"),
         ("odd/git~1/notes.md".to_owned(), "a name Git will not store"),

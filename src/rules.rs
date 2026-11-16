@@ -7,8 +7,9 @@ use crate::repo::is_page;
 
 /// The largest page.
 pub const MAX_PAGE: u64 = 1 << 20;
-/// The largest file of any kind.
-pub const MAX_FILE: u64 = 10 << 20;
+/// The largest file of any kind. It is also the largest file GitHub takes, so a wiki synced to a
+/// plain Git host keeps working.
+pub const MAX_FILE: u64 = 100 << 20;
 
 /// What a path holds, as Git would store it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,6 +22,20 @@ pub enum Entry {
     Repository,
 }
 
+/// The largest blob that is ever read into memory whole: by the index, when it looks for a page
+/// under a new name among what a commit took away and added, and by the reading API, for a blob
+/// that Git stores as a delta of another. It is the largest file the rules let in before files
+/// could be large, so that every history made under those rules, and every push from a service
+/// that still keeps them, is taken as it always was. A larger blob is only ever read as a
+/// stream, so the push check refuses one stored as a delta.
+pub const MAX_WHOLE: u64 = 10 << 20;
+
+/// The size over which Git is told to read and write a blob as a stream and never as a delta, as
+/// `core.bigFileThreshold`, in the server's repository and in the autosave service's Git: the
+/// largest page, so that pages are still stored as deltas. Under its own default of 512 MiB, Git
+/// holds a blob in memory whole, and twice over while it compresses one.
+pub const STREAMED_OVER: u64 = MAX_PAGE;
+
 /// A rule that a path breaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Broken {
@@ -32,7 +47,7 @@ pub enum Broken {
     Repository,
     #[error("a page over 1 MiB")]
     LargePage,
-    #[error("a file over 10 MiB")]
+    #[error("a file over 100 MiB")]
     LargeFile,
 }
 

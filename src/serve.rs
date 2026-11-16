@@ -26,7 +26,7 @@ use crate::git_version;
 use crate::index::{Index, Status};
 use crate::machines::Machines;
 use crate::repo::{NotOnMain, Repo};
-use crate::{edit, git_http};
+use crate::{edit, git_http, raw, rules};
 use crate::{log, now};
 
 /// The longest a change to the machines' state waits before it is written.
@@ -39,6 +39,12 @@ const PARENT_EVERY: Duration = Duration::from_secs(1);
 const REPO_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
 /// Where a folder's reading API listens unless `--addr` says otherwise.
 const FOLDER_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081);
+/// A folder is the user's own clone, where a stock `git gc` stores large files as deltas, so its
+/// files are read whole when they cannot be streamed, whatever their size.
+const FOLDER_SENDING: raw::Sending = raw::Sending {
+    private: false,
+    whole_up_to: None,
+};
 
 /// Where `mneme serve` finds the wiki and listens.
 #[derive(Debug, clap::Args)]
@@ -211,7 +217,13 @@ async fn serve_repo(path: PathBuf, args: &Args) -> Result<()> {
     let wiki = Arc::new(wiki);
     let (stop, stopped) = oneshot::channel();
     let saving = tokio::spawn(save_machines(Arc::clone(&wiki), stopped));
-    let mut reading = api::router(Arc::clone(&wiki));
+    // The server holds no file over the size the rules let in whole: a delta of a larger one
+    // is refused rather than rebuilt in its memory.
+    let sending = raw::Sending {
+        private: args.private_api,
+        whole_up_to: Some(rules::MAX_WHOLE),
+    };
+    let mut reading = api::router(Arc::clone(&wiki), sending);
     if args.private_api {
         let tokens = Arc::clone(&tokens);
         reading = reading.layer(middleware::from_fn_with_state(tokens, auth::any_token));
@@ -262,7 +274,7 @@ async fn serve_folder(folder: &Path, args: &Args) -> Result<()> {
     let following = tokio::spawn(follow(Arc::clone(&wiki)));
     let router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .merge(api::router(wiki))
+        .merge(api::router(wiki, FOLDER_SENDING))
         .layer(middleware::from_fn(loopback_host))
         .layer(middleware::from_fn(request_log));
     listen(addr, router, stopping).await?;

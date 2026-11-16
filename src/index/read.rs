@@ -24,6 +24,12 @@ pub enum Missing {
     Text,
     #[error("no page that is not deleted has had this path")]
     Path,
+    #[error("no file is at this path, and none was deleted there")]
+    File,
+    #[error("no file is at this path")]
+    Bytes,
+    #[error("no file was at this path at this commit")]
+    BytesThen,
 }
 
 /// Which page a question is on.
@@ -417,6 +423,15 @@ impl Index {
             }
         };
         Ok(Diff { from, to })
+    }
+
+    /// Checks that `commit` is on `main`.
+    ///
+    /// # Errors
+    ///
+    /// [`Missing::Commit`] when it is not.
+    pub fn on_main(&self, commit: &str) -> Result<()> {
+        self.seq(Some(commit)).map(drop)
     }
 
     fn rowid(&self, page: &PageId) -> Result<i64> {

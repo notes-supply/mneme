@@ -5,6 +5,7 @@
 use std::path::Path;
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use axum::body::{Body, Bytes};
@@ -16,19 +17,35 @@ use axum::routing::any;
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStdout, Command};
 use tokio::sync::mpsc;
+use tokio::time::{Instant, timeout};
 
 use crate::auth::{Access, Machine, Tokens, unauthorized};
 use crate::machines::{MAX_REPORT, REPORT_HEADER, Report, Unreadable};
 use crate::serve::Wiki;
-use crate::{hook, log, now};
+use crate::{hook, log, now, rules};
 
 const PREFIX: &str = "/git/wiki.git";
-/// The largest request body, a pack included.
-const MAX_BODY: u64 = 64 << 20;
+/// The largest pack a push may carry: ten files of the largest size the rules let in, and the
+/// pages around them. Git writes a pack to the repository's volume before the push check can
+/// read it, so this is the most of the volume that one push can take before it is refused. Git
+/// refuses a larger pack itself, as `receive.maxInputSize`, with a reason the pushing client
+/// shows.
+pub const MAX_PACK: u64 = 1 << 30;
+/// The most of a request body that Git is given: a pack and the few lines before it. A body
+/// with a longer declared length is refused before Git runs.
+const MAX_BODY: u64 = MAX_PACK + (1 << 20);
 const MAX_HEADERS: usize = 64 << 10;
+/// How long a request body may go without a byte before the push is given up on, all through
+/// the body. A slow link still sends something this often.
+const IDLE: Duration = Duration::from_secs(60);
+/// How long the rest of a body is read after Git has refused it, in all, so that a client that
+/// trickles bytes cannot hold the request. A client on a fast link sends the rest of a pack at
+/// the limit in this time, and one on a slow link gets a broken connection instead of Git's
+/// reason, as every client did before the rest was read.
+const DRAIN: Duration = Duration::from_secs(60);
 /// How much of the child's standard error is logged. The rest is read and dropped.
 const MAX_STDERR: u64 = 16 << 10;
 
@@ -67,16 +84,18 @@ pub fn prepare(repo: &Path) -> Result<()> {
         run(&mut init)?;
     }
     for (key, value) in [
-        ("receive.denyNonFastForwards", "true"),
-        ("receive.denyDeletes", "true"),
-        ("receive.fsckObjects", "true"),
-        ("http.receivepack", "true"),
+        ("receive.denyNonFastForwards", "true".to_owned()),
+        ("receive.denyDeletes", "true".to_owned()),
+        ("receive.fsckObjects", "true".to_owned()),
+        ("http.receivepack", "true".to_owned()),
+        ("core.bigFileThreshold", rules::STREAMED_OVER.to_string()),
+        ("receive.maxInputSize", MAX_PACK.to_string()),
     ] {
         let mut config = StdCommand::new("git");
         config
             .arg("--git-dir")
             .arg(repo)
-            .args(["config", key, value]);
+            .args(["config", key, &value]);
         run(&mut config)?;
     }
     hook::install(repo)
@@ -212,7 +231,11 @@ async fn cgi(wiki: Arc<Wiki>, machine: &str, request: Request) -> Result<Respons
     let stdin = child.stdin.take().context("no stdin")?;
     let mut stdout = BufReader::new(child.stdout.take().context("no stdout")?);
     let mut stderr = child.stderr.take().context("no stderr")?;
-    let feeding = tokio::spawn(feed(body, stdin));
+    let patience = Patience {
+        idle: IDLE,
+        drain: DRAIN,
+    };
+    let feeding = tokio::spawn(feed(body, stdin, MAX_BODY, patience));
     let errors = tokio::spawn(async move {
         let mut text = String::new();
         let _ = (&mut stderr)
@@ -261,19 +284,79 @@ async fn cgi(wiki: Arc<Wiki>, machine: &str, request: Request) -> Result<Respons
     Ok(response)
 }
 
-/// Streams the request body to the child, up to [`MAX_BODY`]. Closing stdin ends the body.
-async fn feed(body: Body, mut stdin: ChildStdin) -> Result<()> {
+/// How long [`feed`] waits for a client.
+#[derive(Clone, Copy, Debug)]
+struct Patience {
+    /// The longest wait for the next piece of the body, all through it.
+    idle: Duration,
+    /// The longest the rest of the body is read for, in all, once Git has refused it.
+    drain: Duration,
+}
+
+/// Streams the request body to the child, up to `most` bytes. Closing stdin ends the body.
+///
+/// Once the child has stopped reading, as Git does when a pack is over `receive.maxInputSize`,
+/// or the body has passed `most`, the rest of the body is still read, and dropped. The response
+/// ends only when the body has, so the client sends its whole pack and then reads why it was
+/// refused. Were the connection closed under it, Git would report a broken connection, which an
+/// autosave service takes for a server it cannot reach and tries again for ever.
+///
+/// A client that sends nothing for `patience.idle`, or that is still sending the rest of a
+/// refused body after `patience.drain`, is given up on, so that it cannot hold the request and
+/// the index's update after it.
+async fn feed(
+    body: Body,
+    stdin: impl AsyncWrite + Unpin,
+    most: u64,
+    patience: Patience,
+) -> Result<()> {
     let mut stream = body.into_data_stream();
+    let mut stdin = Some(stdin);
     let mut total = 0;
-    while let Some(chunk) = stream.next().await {
+    let mut stopped: Result<()> = Ok(());
+    let mut drain_until = None;
+    loop {
+        let wait = drain_until.map_or(patience.idle, |until: Instant| {
+            patience
+                .idle
+                .min(until.saturating_duration_since(Instant::now()))
+        });
+        let Ok(next) = timeout(wait, stream.next()).await else {
+            let gave_up = if drain_until.is_some_and(|until| Instant::now() >= until) {
+                format!(
+                    "the client was still sending the rest of the body after {} s",
+                    patience.drain.as_secs_f64()
+                )
+            } else {
+                format!(
+                    "the client sent nothing for {} s",
+                    patience.idle.as_secs_f64()
+                )
+            };
+            return Err(match stopped {
+                Ok(()) => anyhow::anyhow!(gave_up),
+                Err(refused) => refused.context(gave_up),
+            });
+        };
+        let Some(chunk) = next else {
+            return stopped;
+        };
         let chunk = chunk?;
         total += chunk.len() as u64;
-        if total > MAX_BODY {
-            bail!("the request body is over {MAX_BODY} bytes");
+        let Some(open) = &mut stdin else {
+            continue;
+        };
+        let fed = if total > most {
+            Err(anyhow::anyhow!("the request body is over {most} bytes"))
+        } else {
+            open.write_all(&chunk).await.map_err(anyhow::Error::from)
+        };
+        if fed.is_err() {
+            stopped = fed;
+            stdin = None;
+            drain_until = Some(Instant::now() + patience.drain);
         }
-        stdin.write_all(&chunk).await?;
     }
-    Ok(())
 }
 
 /// The CGI response headers, up to the blank line.
@@ -333,7 +416,147 @@ async fn pump(mut stdout: BufReader<ChildStdout>, sender: &mpsc::Sender<std::io:
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context as TaskContext, Poll};
+
     use super::*;
+
+    /// A child that has stopped reading its standard input.
+    struct Closed;
+
+    impl AsyncWrite for Closed {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+            _: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Patience long enough that no test of what is read waits it out.
+    const PATIENT: Patience = Patience {
+        idle: Duration::from_secs(60),
+        drain: Duration::from_secs(60),
+    };
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+    }
+
+    /// A body of `chunks` chunks of ten bytes, `gap` apart, then `then`.
+    fn slow_body(
+        chunks: usize,
+        gap: Duration,
+        then: impl futures_util::Stream<Item = std::io::Result<Bytes>> + Send + 'static,
+    ) -> Body {
+        let pieces = futures_util::stream::unfold(0, move |sent| async move {
+            if sent == chunks {
+                return None;
+            }
+            tokio::time::sleep(gap).await;
+            Some((Ok(Bytes::from_static(b"ten bytes!")), sent + 1))
+        });
+        Body::from_stream(pieces.chain(then))
+    }
+
+    #[test]
+    fn a_client_that_stalls_is_given_up_on_and_a_slow_one_is_not() {
+        runtime().block_on(async {
+            let patience = Patience {
+                idle: Duration::from_millis(300),
+                drain: Duration::from_millis(100),
+            };
+            let started = Instant::now();
+            let stalled = slow_body(2, Duration::ZERO, futures_util::stream::pending());
+            let mut fed = Vec::new();
+            let error = feed(stalled, &mut fed, 1000, patience).await.unwrap_err();
+            assert_eq!(format!("{error:#}"), "the client sent nothing for 0.3 s");
+            assert_eq!(fed.len(), 20, "what came before the stall reached Git");
+            assert!(started.elapsed() < Duration::from_secs(2));
+
+            let started = Instant::now();
+            let endless = futures_util::stream::repeat_with(|| Ok(Bytes::from_static(b"x")));
+            let trickling = slow_body(usize::MAX, Duration::from_millis(20), endless);
+            let error = feed(trickling, Closed, 1000, patience).await.unwrap_err();
+            let error = format!("{error:#}");
+            assert!(
+                error
+                    .starts_with("the client was still sending the rest of the body after 0.1 s: ")
+                    && error.contains("roken pipe"),
+                "{error}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "a trickle after a refusal is given up on"
+            );
+
+            let slow = slow_body(20, Duration::from_millis(30), futures_util::stream::empty());
+            let mut fed = Vec::new();
+            feed(slow, &mut fed, 1000, patience).await.unwrap();
+            assert_eq!(
+                fed.len(),
+                200,
+                "a body that keeps coming is read whole, however long it takes in all"
+            );
+        });
+    }
+
+    /// A body of `chunks` chunks of ten bytes, and how many of them were read.
+    fn body(chunks: usize) -> (Body, Arc<AtomicUsize>) {
+        let read = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&read);
+        let stream = futures_util::stream::iter(0..chunks).map(move |_| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, std::io::Error>(Bytes::from_static(b"ten bytes!"))
+        });
+        (Body::from_stream(stream), read)
+    }
+
+    #[test]
+    fn a_body_is_read_to_its_end_even_when_it_is_too_long_or_git_has_stopped_reading() {
+        runtime().block_on(async {
+            let (whole, read) = body(5);
+            let mut fed = Vec::new();
+            feed(whole, &mut fed, 50, PATIENT).await.unwrap();
+            assert_eq!((fed.len(), read.load(Ordering::Relaxed)), (50, 5));
+
+            let (long, read) = body(5);
+            let mut fed = Vec::new();
+            let error = feed(long, &mut fed, 25, PATIENT).await.unwrap_err();
+            assert_eq!(error.to_string(), "the request body is over 25 bytes");
+            assert_eq!(fed.len(), 20, "only whole chunks under the limit reach Git");
+            assert_eq!(
+                read.load(Ordering::Relaxed),
+                5,
+                "the rest is read and dropped"
+            );
+
+            let (unread, read) = body(5);
+            let error = feed(unread, Closed, 50, PATIENT).await.unwrap_err();
+            assert!(error.to_string().contains("roken pipe"), "{error}");
+            assert_eq!(
+                read.load(Ordering::Relaxed),
+                5,
+                "the rest is read and dropped"
+            );
+        });
+    }
 
     #[test]
     fn the_service_is_read_from_the_path_or_the_last_service_in_the_query() {
