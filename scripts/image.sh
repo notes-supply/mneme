@@ -15,7 +15,7 @@ server_limits=(--cpus 2 --memory "$pod_memory" --memory-swap "$pod_memory" --log
 # The largest file the rules let in.
 large=$((100 << 20))
 # The most memory the server may hold that it cannot give back while such a file passes through.
-# It measured 4 MiB. Without core.bigFileThreshold, Git alone holds 200 MiB.
+# It measured 4 to 6 MiB. Without core.bigFileThreshold, Git alone holds 200 MiB.
 most_held=$((64 << 20))
 work=$(mktemp -d)
 volume=mneme-image-check-$$
