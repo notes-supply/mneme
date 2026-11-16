@@ -118,6 +118,12 @@ async fn answer(
     let mut headers = HeaderMap::new();
     headers.insert(ETAG, tag.clone());
     headers.insert(CACHE_CONTROL, HeaderValue::from_static(cache));
+    // A cache takes the headers of a 304 into the answer it keeps, so the file's own policy goes
+    // with it too, and not the one for answers that are not a file.
+    headers.insert(
+        CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(media.policy),
+    );
     if asked
         .get(IF_NONE_MATCH)
         .is_some_and(|known| matches(known, &tag))
@@ -149,10 +155,6 @@ async fn answer(
     };
     headers.insert(CONTENT_TYPE, HeaderValue::from_static(media.content_type));
     headers.insert(CONTENT_DISPOSITION, header(&disposition)?);
-    headers.insert(
-        CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(media.policy),
-    );
     headers.insert(CONTENT_LENGTH, HeaderValue::from(length));
     let body = if method == Method::HEAD || length == 0 {
         Body::empty()

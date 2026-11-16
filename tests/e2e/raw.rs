@@ -227,6 +227,36 @@ fn a_known_tag_gets_304_and_another_gets_the_file() {
     assert_eq!(head.status, 304);
 }
 
+/// A cache takes the headers of a 304 into the answer it keeps, so a 304 carries the file's own
+/// policy: a PDF must not gain a sandbox, nor an SVG lose its inline styles.
+#[test]
+fn a_304_carries_the_files_own_policy() {
+    let work = brand();
+    work.write_bytes("brand/deck.pdf", b"%PDF-1.4\nNot a real deck.\n");
+    work.commit("Add a deck");
+    let server = Server::of(&work);
+    for (path, policy) in [
+        ("brand/logo.svg", SANDBOXED),
+        (
+            "brand/deck.pdf",
+            "default-src 'none'; style-src 'unsafe-inline'",
+        ),
+    ] {
+        let url = format!("/v1/raw/{path}");
+        let first = server.get(&url);
+        assert_eq!(header(&first, "content-security-policy"), policy, "{path}");
+        let known = header(&first, "etag").to_owned();
+        let again = server.get_with(&url, &[("if-none-match", &known)]);
+        assert_eq!(again.status, 304, "{path}");
+        assert_eq!(header(&again, "content-security-policy"), policy, "{path}");
+        assert_eq!(
+            header(&again, "x-content-type-options"),
+            "nosniff",
+            "{path}"
+        );
+    }
+}
+
 #[test]
 fn one_range_is_sent_as_206_and_one_that_cannot_be_met_is_416() {
     let work = brand();
