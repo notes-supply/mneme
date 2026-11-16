@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 
 use super::Settings;
+use crate::rules;
 
 pub(super) use crate::repo::NO_OBJECT;
 
@@ -68,6 +69,12 @@ impl Git {
             ("core.fsmonitor".to_owned(), "false".to_owned()),
             ("gc.autoDetach".to_owned(), "false".to_owned()),
             ("maintenance.autoDetach".to_owned(), "false".to_owned()),
+            // A large file is staged, sent, fetched and checked out as a stream, and never
+            // compared with another to store it as a delta.
+            (
+                "core.bigFileThreshold".to_owned(),
+                rules::STREAMED_OVER.to_string(),
+            ),
         ]);
         let mut env: Vec<(OsString, OsString)> = vec![
             ("GIT_DIR".into(), repository.clone().into()),
