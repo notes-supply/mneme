@@ -15,7 +15,7 @@ server_limits=(--cpus 2 --memory "$pod_memory" --memory-swap "$pod_memory" --log
 # The largest file the rules let in.
 large=$((100 << 20))
 # The most memory the server may hold that it cannot give back while such a file passes through.
-# It measured 10 MiB. Without core.bigFileThreshold, Git alone holds 200 MiB.
+# It measured 4 MiB. Without core.bigFileThreshold, Git alone holds 200 MiB.
 most_held=$((64 << 20))
 work=$(mktemp -d)
 volume=mneme-image-check-$$
@@ -180,17 +180,24 @@ echo "an overlapping edit was replayed and pushed with an Overlap trailer naming
 # A file of the largest size the rules let in, of bytes that do not compress, in the pod's
 # memory: pushed by hand with a stock Git, fetched by a second clone, read back whole and by
 # range, then changed in one folder by the autosave service and followed in the other. A sampler
-# in the container notes the most memory the server held that it could not give back, which is
-# everything charged to it but the page cache. The cache fills what is left of the limit and is
-# dropped when something else needs the room.
+# in the container notes the most memory the server held that it could not give back. With no
+# swap that is its anonymous memory (`anon`: the heap and stacks of mneme and of Git), its shared
+# memory (`shmem`, which is in `file` but cannot be dropped), and memory the kernel holds for it
+# (`kernel`: page tables, socket buffers and slab, part of which could be given back, so it counts
+# high). All three come from one read of `memory.stat`, so they belong to one moment. The page
+# cache is left out: it fills what is left of the limit and is dropped when something needs room.
 podman exec "$container" sh -c '
   peak=0
   while [ ! -e /tmp/sampled ]; do
-    read -r current < /sys/fs/cgroup/memory.current
+    stat=$(cat /sys/fs/cgroup/memory.stat)
+    anon= shmem= kernel=
     while read -r key value; do
-      case $key in file) file=$value ;; shmem) shmem=$value ;; esac
-    done < /sys/fs/cgroup/memory.stat
-    held=$((current - file + shmem))
+      case $key in anon) anon=$value ;; shmem) shmem=$value ;; kernel) kernel=$value ;; esac
+    done <<STAT
+$stat
+STAT
+    if [ -z "$anon" ] || [ -z "$shmem" ] || [ -z "$kernel" ]; then echo unreadable; exit; fi
+    held=$((anon + shmem + kernel))
     if [ "$held" -gt "$peak" ]; then peak=$held; echo "$peak"; fi
     sleep 0.05
   done' > "$work/held" &
@@ -250,9 +257,12 @@ for event in oom oom_kill; do
     *) fail "the server ran out of memory: $events" ;;
   esac
 done
-[ -n "$held" ] && [ "$held" -lt "$most_held" ] \
-  || fail "the server held ${held:-an unknown number of} bytes it could not give back, and may hold $most_held"
-echo "the server was never out of memory: it held at most $((held >> 20)) MiB it could not give back, and $(($(memory memory.peak) >> 20)) MiB with the page cache, of $((pod_memory >> 20)) MiB"
+case $held in
+  '' | *[!0-9]*) fail "the sampler could not read anon, shmem and kernel from memory.stat: ${held:-nothing}" ;;
+esac
+[ "$held" -lt "$most_held" ] \
+  || fail "the server held $held bytes of anonymous, shared and kernel memory, and may hold $most_held"
+echo "the server was never out of memory: it held at most $((held >> 20)) MiB of anonymous, shared and kernel memory, and $(($(memory memory.peak) >> 20)) MiB with the page cache, of $((pod_memory >> 20)) MiB"
 
 podman save -q -o "$work/image.tar" "$image"
 trivy image --input "$work/image.tar" --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
