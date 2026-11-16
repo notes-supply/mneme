@@ -12,7 +12,7 @@ The gate checks formatting, runs clippy with warnings denied, runs the tests wit
 
 The tests include a simulation of three clones, a fourth that follows, and a server over 128 seeds, and the same against a bare repository. `mise run soak` runs 2000 seeds of each and the kill test over 20. They also pipe `install.sh` to `sh` against a fake release served on loopback, for a good install, a bad checksum, an unknown architecture and the cosign check.
 
-`mise run image` builds the server's image and checks it with a real clone and push, the autosave service run from the image against it, and a Trivy scan (see [deploy.md](deploy.md)).
+`mise run image` builds the server's image and checks it with a real clone and push, the autosave service run from the image against it, a file of 100 MiB pushed, fetched and read back while the server has the 256 MiB of its pod, and a Trivy scan (see [deploy.md](deploy.md)). The gate's own tests hold the size limit to the rule and never send a file that large.
 
 ## Build it
 
