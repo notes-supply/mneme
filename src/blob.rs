@@ -1,7 +1,8 @@
 //! Reads one blob's bytes in order, so that a file of any size is sent without being held in
 //! memory. gix reads an object whole, so this reads the two forms Git stores a large blob in
 //! itself: a loose object, and a pack entry that is not a delta. Both are one zlib stream in a
-//! file. A blob stored as a delta can only be rebuilt whole, and is read with gix.
+//! file. A blob stored as a delta can only be rebuilt whole, and is read with gix, up to a size
+//! the caller names.
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
@@ -17,6 +18,19 @@ use gix::zlib::stream::inflate;
 const BUFFER: usize = 64 << 10;
 /// The longest header of a loose object that is read: `blob`, a space, a size and a NUL.
 const MAX_LOOSE_HEADER: usize = 32;
+
+/// A blob that cannot be read as a stream, such as one stored as a delta, and is larger than the
+/// caller would hold in memory whole.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "blob {blob} is {size} bytes and cannot be read as a stream, and at most {most} bytes are \
+     read whole"
+)]
+pub struct TooLargeWhole {
+    pub blob: ObjectId,
+    pub size: u64,
+    pub most: u64,
+}
 
 /// A blob being read from its first byte to its last.
 pub struct Reader {
@@ -43,12 +57,18 @@ struct Stream {
 impl Reader {
     /// Opens the blob `id` of `repo`: the loose object when there is one, or else its entry in
     /// a pack. Whatever cannot be read as a stream, such as a delta or a blob in an alternate
-    /// object directory, is read whole.
+    /// object directory, is read whole, when it is at most `whole_up_to` bytes or that is
+    /// `None`.
     ///
     /// # Errors
     ///
-    /// Fails when the blob cannot be found or read.
-    pub(crate) fn open(repo: &gix::Repository, id: ObjectId) -> Result<Self> {
+    /// Fails when the blob cannot be found or read, and with [`TooLargeWhole`] when it would be
+    /// read whole and is larger than `whole_up_to`.
+    pub(crate) fn open(
+        repo: &gix::Repository,
+        id: ObjectId,
+        whole_up_to: Option<u64>,
+    ) -> Result<Self> {
         let objects = repo.objects.store_ref().path();
         let stream = loose(objects, id)
             .transpose()
@@ -59,6 +79,20 @@ impl Reader {
             let size = stream.size;
             (Source::Deflated(stream), size)
         } else {
+            if let Some(most) = whole_up_to {
+                let size = repo
+                    .find_header(id)
+                    .with_context(|| format!("reading the header of blob {id}"))?
+                    .size();
+                if size > most {
+                    return Err(TooLargeWhole {
+                        blob: id,
+                        size,
+                        most,
+                    }
+                    .into());
+                }
+            }
             let data = repo
                 .find_blob(id)
                 .with_context(|| format!("reading blob {id}"))?
@@ -263,14 +297,14 @@ mod tests {
         assert!(read(stream) == bytes, "the pack entry's bytes");
 
         let repo = gix::open(dir.path()).unwrap();
-        let mut reader = Reader::open(&repo, id).unwrap();
+        let mut reader = Reader::open(&repo, id, None).unwrap();
         assert!(matches!(reader.source, Source::Deflated(_)));
         reader.skip(BUFFER as u64 + 5).unwrap();
         let mut rest = Vec::new();
         reader.read_to_end(&mut rest).unwrap();
         assert!(rest == bytes[BUFFER + 5..], "the bytes after a skip");
         assert!(
-            Reader::open(&repo, id)
+            Reader::open(&repo, id, None)
                 .unwrap()
                 .skip(bytes.len() as u64 + 1)
                 .is_err(),

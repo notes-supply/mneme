@@ -164,8 +164,9 @@ The bytes of the file at `path` on `main`, a page included. The path may hold sl
 | `400` | `at` is not a full commit id |
 | `404` | nothing is at the path, the commit is unknown or not on `main`, or the path held a folder, a symlink or a submodule |
 | `416` | the range holds none of the file's bytes; `Content-Range` is `bytes */<size>` |
+| `503` | `mneme serve --repo` only: the file is over 10 MiB and stored as a delta of another, which the server would have to hold in memory whole; `git repack -a -d -F` in its repository stores it whole |
 
-An error's body is `{ "error" }`. A file is sent as it is read from the repository, so a large one takes no more of the server's memory than a small one.
+An error's body is `{ "error" }`. A file is sent as it is read from the repository, so a large one takes no more of the server's memory than a small one. The server's push check keeps a large file from arriving as a delta and its Git never makes one, so the `503` needs a repository that was changed by hand. `mneme serve --folder` reads such a file whole and sends it.
 
 - **`Content-Length`** is always there.
 - **`ETag`** is the id Git gives the bytes, in quotes. It is strong: the same bytes have the same tag at any path and any commit.

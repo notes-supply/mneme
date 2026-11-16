@@ -183,13 +183,15 @@ impl Repo {
         size(&self.repo, blob)
     }
 
-    /// Opens a blob to read its bytes in order.
+    /// Opens a blob to read its bytes in order. A blob that cannot be read as a stream is read
+    /// whole, when it is at most `whole_up_to` bytes or that is `None`.
     ///
     /// # Errors
     ///
-    /// Fails when the blob cannot be found or read.
-    pub fn open_blob(&self, blob: ObjectId) -> Result<blob::Reader> {
-        blob::Reader::open(&self.repo, blob)
+    /// Fails when the blob cannot be found or read, and with [`blob::TooLargeWhole`] when it
+    /// would be read whole and is larger than `whole_up_to`.
+    pub fn open_blob(&self, blob: ObjectId, whole_up_to: Option<u64>) -> Result<blob::Reader> {
+        blob::Reader::open(&self.repo, blob, whole_up_to)
     }
 }
 

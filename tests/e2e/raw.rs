@@ -2,6 +2,7 @@
 
 use std::fs;
 
+use mneme::rules::MAX_WHOLE;
 use tempfile::TempDir;
 
 use crate::files::{brand, bytes};
@@ -567,6 +568,79 @@ fn a_file_is_read_from_a_loose_object_a_pack_and_a_delta() {
         "Git stored both versions of the film whole"
     );
     check(&Server::of(&work), "packed whole");
+}
+
+/// A stock `git gc` stores one version of a large file as a delta of the other, which can only be
+/// read whole. The server refuses to hold one over [`MAX_WHOLE`] in memory and says why, while a
+/// folder, the user's own clone, reads it whole.
+#[test]
+fn a_large_file_stored_as_a_delta_is_refused_by_the_server_and_read_whole_in_a_folder() {
+    let block = bytes(12, 4096);
+    let film = |tail: &str| -> Vec<u8> {
+        let mut film: Vec<u8> = block
+            .iter()
+            .copied()
+            .cycle()
+            .take(usize::try_from(MAX_WHOLE).unwrap() + 4096)
+            .collect();
+        film.extend_from_slice(tail.as_bytes());
+        film
+    };
+    let work = Work::new();
+    let (first, second) = (film("the first cut"), film("the second cut"));
+    work.write_bytes("brand/film.bin", &first);
+    let old = work.commit("Add a film");
+    work.write_bytes("brand/film.bin", &second);
+    let new = work.commit("Cut it again");
+    work.ok(&["gc", "-q", "--aggressive"]);
+    let delta = [(&old, &first), (&new, &second)]
+        .into_iter()
+        .find(|(commit, _)| {
+            let id = work.ok(&["rev-parse", &format!("{commit}:brand/film.bin")]);
+            let base = work.git_stdin(&["cat-file", "--batch-check=%(deltabase)"], &id);
+            base.trim().bytes().any(|b| b != b'0')
+        })
+        .expect("Git stored one version as a delta of the other");
+    let (commit, bytes_of_delta) = delta;
+    let blob = work.ok(&["rev-parse", &format!("{commit}:brand/film.bin")]);
+    let url = format!("/v1/raw/brand/film.bin?at={commit}");
+
+    let server = Server::of(&work);
+    let refused = server.get(&url);
+    assert_eq!(refused.status, 503, "{}", refused.body);
+    assert!(
+        refused.json()["error"]
+            .as_str()
+            .unwrap()
+            .contains("stored as a delta of another and is over 10 MiB"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(header(&refused, "x-content-type-options"), "nosniff");
+    assert_eq!(refused.header("etag"), None);
+    let log = server.log_with(r#""path":"brand/film.bin""#);
+    assert!(
+        log.iter()
+            .any(|line| line.contains(r#""event":"error""#) && line.contains(blob.trim())),
+        "the log names the blob: {log:?}"
+    );
+    let head = server.request("HEAD", &url, &[], b"");
+    assert_eq!(
+        head.status, 200,
+        "HEAD reads no bytes, so it needs none whole"
+    );
+    let ranged = server.get_with(&url, &[("range", "bytes=0-9")]);
+    assert_eq!(ranged.status, 503, "a range would read it whole as well");
+
+    let folder = TempDir::new().unwrap();
+    work.ok(&["clone", "-q", ".", folder.path().to_str().unwrap()]);
+    let local = Server::folder(folder.path(), &work.git, &[]);
+    let read = local.get(&url);
+    assert_eq!(read.status, 200, "{}", read.body);
+    assert!(
+        &read.bytes == bytes_of_delta,
+        "the folder sends the whole file"
+    );
 }
 
 #[test]

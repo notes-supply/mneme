@@ -28,9 +28,8 @@ use crate::{index, log, now, raw};
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 500;
 
-/// The routes under `/v1`. `private` is set when they ask for a token, which a file's bytes
-/// tell a cache.
-pub fn router(wiki: Arc<Wiki>, private: bool) -> Router {
+/// The routes under `/v1`, with how a file's bytes are sent.
+pub fn router(wiki: Arc<Wiki>, sending: raw::Sending) -> Router {
     let json = Router::new()
         .route("/v1/status", get(status))
         .route("/v1/pages", get(pages))
@@ -51,7 +50,7 @@ pub fn router(wiki: Arc<Wiki>, private: bool) -> Router {
         .with_state(Arc::clone(&wiki));
     // A file's bytes are sent as they are read, so they stay outside the layer above, which
     // holds a whole body to hash it.
-    raw::router(wiki, private).merge(json)
+    raw::router(wiki, sending).merge(json)
 }
 
 /// An error answered as `{ "error": "..." }`.

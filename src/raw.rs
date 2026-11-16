@@ -22,21 +22,31 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::api::{ApiError, Params, matches};
+use crate::blob::{self, TooLargeWhole};
 use crate::index::Missing;
-use crate::media;
 use crate::repo::Repo;
 use crate::serve::Wiki;
+use crate::{log, media};
 
 /// How much of a file is read and sent at a time, which is all of it that is in memory at once.
 const PIECE: usize = 64 << 10;
 /// What a browser is told about every answer that is not a file, an error included.
 const NOTHING: &str = "default-src 'none'; sandbox";
 
+/// How a server sends a file's bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct Sending {
+    /// Whether the reading API asks for a token, so that no shared cache may keep an answer.
+    pub private: bool,
+    /// The largest blob read into memory whole when it cannot be read as a stream, such as one
+    /// stored as a delta. `None` reads any blob whole.
+    pub whole_up_to: Option<u64>,
+}
+
 #[derive(Clone)]
 struct Raw {
     wiki: Arc<Wiki>,
-    /// Whether the reading API asks for a token, so that no shared cache may keep an answer.
-    private: bool,
+    sending: Sending,
 }
 
 #[derive(Deserialize)]
@@ -44,11 +54,11 @@ struct At {
     at: Option<String>,
 }
 
-/// The route for a file's bytes. `private` is set when the reading API asks for a token.
-pub fn router(wiki: Arc<Wiki>, private: bool) -> Router {
+/// The route for a file's bytes.
+pub fn router(wiki: Arc<Wiki>, sending: Sending) -> Router {
     Router::new()
         .route("/v1/raw/{*path}", get(raw))
-        .with_state(Raw { wiki, private })
+        .with_state(Raw { wiki, sending })
 }
 
 /// The part of a file a request asks for.
@@ -92,6 +102,7 @@ async fn answer(
         .map_err(|_| ApiError::BadRequest("at is not a full commit id".to_owned()))?;
     let media = media::of(&path);
     let disposition = media::disposition(media, &path);
+    let named = path.clone();
     let (blob, size) = raw
         .wiki
         .read(move |repo, index| {
@@ -109,7 +120,7 @@ async fn answer(
 
     // The blob's id names the bytes, so it is a strong validator.
     let tag = header(&format!("\"{blob}\""))?;
-    let cache = match (raw.private, at.is_some()) {
+    let cache = match (raw.sending.private, at.is_some()) {
         (false, true) => "max-age=31536000, immutable",
         (false, false) => "no-cache",
         (true, true) => "private, max-age=31536000, immutable",
@@ -159,34 +170,70 @@ async fn answer(
     let body = if method == Method::HEAD || length == 0 {
         Body::empty()
     } else {
-        stream(&raw.wiki, blob, start, length).await?
+        match open(&raw.wiki, blob, start, raw.sending.whole_up_to).await? {
+            Ok(reader) => stream(reader, length),
+            Err(too_large) => return Ok(not_streamable(&too_large, &named)),
+        }
     };
     Ok((status, headers, body).into_response())
+}
+
+/// The answer for a blob the server will not read whole: 503, since the server cannot send
+/// it as it stores it now, and can once the repository is repacked with its own settings. The
+/// log names the blob and the path.
+fn not_streamable(too_large: &TooLargeWhole, path: &str) -> Response {
+    log::emit(
+        "error",
+        json!({
+            "error": too_large.to_string(),
+            "blob": too_large.blob.to_string(),
+            "path": path,
+        }),
+    );
+    let error = format!(
+        "the file is stored as a delta of another and is over {} MiB, which the server does not \
+         hold in memory; git repack -a -d -F in the server's repository stores it whole",
+        too_large.most >> 20
+    );
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": error })),
+    )
+        .into_response()
 }
 
 fn header(value: &str) -> Result<HeaderValue, ApiError> {
     HeaderValue::from_str(value).map_err(|error| ApiError::Internal(error.into()))
 }
 
-/// The bytes of `blob` from `start`, `length` of them. Each piece is read when the client is
-/// ready for it, on a thread where blocking is fine, so a slow client holds one piece in memory
-/// and no thread. The blob is opened and read up to `start` first, so that a blob that cannot
-/// be read is an error and not a body cut short.
-async fn stream(
+/// Opens `blob` and reads it up to `start`, so that a blob that cannot be read is an error and
+/// not a body cut short. The inner error is a blob the server will not read whole.
+async fn open(
     wiki: &Arc<Wiki>,
     blob: ObjectId,
     start: u64,
-    length: u64,
-) -> Result<Body, ApiError> {
+    whole_up_to: Option<u64>,
+) -> Result<Result<blob::Reader, TooLargeWhole>, ApiError> {
     let opening = Arc::clone(wiki);
-    let reader = tokio::task::spawn_blocking(move || {
-        let mut reader = Repo::open(opening.path())?.open_blob(blob)?;
+    let opened = tokio::task::spawn_blocking(move || -> anyhow::Result<blob::Reader> {
+        let mut reader = Repo::open(opening.path())?.open_blob(blob, whole_up_to)?;
         reader.skip(start)?;
         Ok(reader)
     })
     .await
-    .map_err(|error| ApiError::Internal(error.into()))?
-    .map_err(ApiError::Internal)?;
+    .map_err(|error| ApiError::Internal(error.into()))?;
+    match opened {
+        Ok(reader) => Ok(Ok(reader)),
+        Err(error) => match error.downcast::<TooLargeWhole>() {
+            Ok(too_large) => Ok(Err(too_large)),
+            Err(error) => Err(ApiError::Internal(error)),
+        },
+    }
+}
+
+/// `length` bytes from `reader`. Each piece is read when the client is ready for it, on a
+/// thread where blocking is fine, so a slow client holds one piece in memory and no thread.
+fn stream(reader: blob::Reader, length: u64) -> Body {
     let pieces =
         futures_util::stream::try_unfold((reader, length), |(mut reader, left)| async move {
             if left == 0 {
@@ -206,7 +253,7 @@ async fn stream(
             let left = left - piece.len() as u64;
             Ok(Some((Bytes::from(piece), (reader, left))))
         });
-    Ok(Body::from_stream(pieces))
+    Body::from_stream(pieces)
 }
 
 /// The part of a file of `size` bytes that a `Range` header asks for. One range of bytes is
