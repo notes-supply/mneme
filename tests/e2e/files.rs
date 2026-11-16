@@ -364,3 +364,44 @@ fn a_symlink_and_a_submodule_are_never_files() {
     );
     assert_eq!(server.get("/v1/files/vendor/lib").status, 404);
 }
+
+/// Two names that differ only in bytes that are not UTF-8 would be one path once those bytes
+/// were replaced, and a change to one would land on the other. Such files are left out.
+#[test]
+fn files_whose_paths_are_not_utf8_are_left_out() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let work = Work::new();
+    let name = |bytes: &[u8]| work.path().join(OsStr::from_bytes(bytes));
+    std::fs::write(name(b"caf\xe9.png"), "one\n").unwrap();
+    std::fs::write(name(b"caf\xe8.png"), "two\n").unwrap();
+    work.write("kept.txt", "A file with a plain name.\n");
+    work.write("index.md", "# Home\n");
+    work.commit("Two names that are not UTF-8");
+    std::fs::write(name(b"caf\xe9.png"), "one, edited\n").unwrap();
+    std::fs::rename(name(b"caf\xe8.png"), name(b"moved-\xff.png")).unwrap();
+    work.commit("Edit one and move the other");
+    std::fs::remove_file(name(b"caf\xe9.png")).unwrap();
+    std::fs::remove_file(name(b"moved-\xff.png")).unwrap();
+    work.commit("Delete both");
+    std::fs::write(name(b"again-\xe9.bin"), "three\n").unwrap();
+    std::fs::rename(work.file("kept.txt"), name(b"kept-\xe9.txt")).unwrap();
+    work.commit("Add another, and move a plain name to one that is not UTF-8");
+    let server = Server::of(&work);
+    let listing = server.json("/v1/files");
+    assert_eq!(listing["total"], 0, "{listing}");
+    let kept = server.json("/v1/files/kept.txt");
+    assert_eq!(
+        kinds(&kept["events"]),
+        [("deleted".to_owned(), 0), ("created".to_owned(), 26)],
+        "a move to a name that is not UTF-8 leaves the files"
+    );
+    let changes = server.json("/v1/changes/files");
+    assert_eq!(changes["total"], 2, "only kept.txt's events: {changes}");
+    assert_eq!(
+        server.json("/v1/pages")["total"],
+        1,
+        "pages are as they were"
+    );
+}

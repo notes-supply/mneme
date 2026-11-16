@@ -13,7 +13,7 @@ Each route that answers with JSON has one example response in `tests/fixtures/ap
 - **Times** are author times, in seconds since the Unix epoch.
 - **Commits** are full 40-character ids of commits on `main`.
 - **Page ids** are 16 hexadecimal characters. A page keeps its id across renames. A page created again at the path of a deleted one has a new id.
-- **Files.** A page is a `.md` file. A file is any other regular file of the wiki, executable or not, such as an image, a PDF or a zip. A symlink or a submodule is neither. Files have no ids: a file is named by its path.
+- **Files.** A page is a `.md` file. A file is any other regular file of the wiki, executable or not, such as an image, a PDF or a zip. A symlink or a submodule is neither. Files have no ids: a file is named by its path. A file whose path is not UTF-8 is in none of the files routes, though Git stores and syncs it.
 - **Versions.** A version is a commit that changed a page's text. Events also include renames that keep the text and deletions. Those have `"version": false`.
 - **Paging.** `limit` defaults to 50 and is capped at 500. `offset` defaults to 0. A paged answer has `total`, the number of items across all pages.
 - **ETag.** Every response of a reading route has a strong `ETag`: the hash of its body, or for `/v1/raw` the id of the file's bytes. A request with a matching `If-None-Match` gets `304` with no body.

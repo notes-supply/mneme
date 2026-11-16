@@ -274,12 +274,21 @@ struct Entry {
     page: bool,
 }
 
+/// The regular file at `location`. A page's path that is not UTF-8 has its bad bytes replaced,
+/// as it always had. Any other file's must be UTF-8, or it is left out: two names that differ
+/// only in bad bytes would be one path once they were replaced, and a change to one would land
+/// on the other.
 fn entry(location: &BStr, mode: EntryMode, blob: ObjectId) -> Option<Entry> {
-    mode.is_blob().then(|| Entry {
-        path: location.to_string(),
-        blob,
-        page: is_page(location),
-    })
+    if !mode.is_blob() {
+        return None;
+    }
+    let page = is_page(location);
+    let path = if page {
+        location.to_string()
+    } else {
+        location.to_str().ok()?.to_owned()
+    };
+    Some(Entry { path, blob, page })
 }
 
 /// An entry as a page, or as a file that is not one.
