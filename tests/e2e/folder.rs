@@ -75,6 +75,9 @@ fn a_folder_answers_as_the_server_does_with_no_git_and_writes_nothing() {
         "/v1/questions",
         "/v1/search?q=harbour",
         "/v1/paths/greek/alpha.md",
+        "/v1/files",
+        "/v1/files/notes/readme.txt",
+        "/v1/changes/files",
     ] {
         assert_eq!(server.json(route), of_repo.json(route), "{route}");
     }
@@ -115,11 +118,20 @@ fn a_folder_follows_new_commits_and_builds_again_after_a_reset() {
         "# New\n\nA page after the start.\n",
     )
     .unwrap();
-    git.ok(folder.path(), &["add", "new.md"]);
-    git.ok(folder.path(), &["commit", "-q", "-m", "Add a page"]);
+    fs::write(folder.path().join("new.txt"), "A file after the start.\n").unwrap();
+    git.ok(folder.path(), &["add", "new.md", "new.txt"]);
+    git.ok(
+        folder.path(),
+        &["commit", "-q", "-m", "Add a page and a file"],
+    );
     let head = git.ok(folder.path(), &["rev-parse", "HEAD"]);
     let followed = wait_for_head(&server, head.trim());
     assert_eq!(followed["pages"].as_u64().unwrap(), pages + 1);
+    assert_eq!(server.json("/v1/files")["total"], 2);
+    assert_eq!(
+        server.json("/v1/files/notes/readme.txt")["file"]["versions"],
+        2
+    );
     assert!(
         server
             .log_with(r#""event":"followed""#)
@@ -153,6 +165,18 @@ fn a_folder_follows_new_commits_and_builds_again_after_a_reset() {
         found.body
     );
     assert_eq!(server.json("/v1/paths/other.md")["current"], true);
+    let files = server.json("/v1/files");
+    assert_eq!(
+        files["total"], 1,
+        "the reset took the new file away: {files}"
+    );
+    assert_eq!(server.get("/v1/files/new.txt").status, 404);
+    let readme = server.json("/v1/files/notes/readme.txt");
+    assert_eq!(
+        (&readme["file"]["versions"], &readme["total"]),
+        (&1.into(), &1.into()),
+        "and the readme's edit, so its history was built again"
+    );
 }
 
 #[test]

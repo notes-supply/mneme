@@ -17,8 +17,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::index::{
-    Filter, Hit, Listing, Missing, Order, Page, PageId, PathMatch, QueryError, Question, Sort,
-    Status, Version, Window,
+    File, FileEvent, FileListing, FileSort, Filter, Hit, Listing, Missing, Order, Page, PageId,
+    PathMatch, QueryError, Question, Sort, Status, Version, Window,
 };
 use crate::machines::Health;
 use crate::serve::Wiki;
@@ -38,8 +38,11 @@ pub fn router(wiki: Arc<Wiki>) -> Router {
         .route("/v1/pages/{id}/versions/{commit}", get(version))
         .route("/v1/pages/{id}/diff", get(diff))
         .route("/v1/changes", get(changes))
+        .route("/v1/changes/files", get(file_changes))
         .route("/v1/questions", get(questions))
         .route("/v1/paths/{*path}", get(path))
+        .route("/v1/files", get(files))
+        .route("/v1/files/{*path}", get(file))
         .route("/v1/search", get(search))
         .route("/v1/machines", get(machines))
         .fallback(|| async { ApiError::NotFound("no such route".to_owned()) })
@@ -153,6 +156,16 @@ struct Slice {
 }
 
 #[derive(Deserialize)]
+struct FilesParams {
+    under: Option<String>,
+    q: Option<String>,
+    sort: Option<FileSort>,
+    order: Option<Order>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
+#[derive(Deserialize)]
 struct SearchText {
     q: String,
 }
@@ -184,6 +197,25 @@ struct PageBody {
 struct EventsBody {
     total: u32,
     events: Vec<Version>,
+}
+
+#[derive(Serialize)]
+struct FilesBody {
+    total: u32,
+    files: Vec<File>,
+}
+
+#[derive(Serialize)]
+struct FileBody {
+    file: File,
+    total: u32,
+    events: Vec<FileEvent>,
+}
+
+#[derive(Serialize)]
+struct FileEventsBody {
+    total: u32,
+    events: Vec<FileEvent>,
 }
 
 #[derive(Serialize)]
@@ -338,6 +370,64 @@ async fn changes(
         })
         .await?;
     Ok(Json(EventsBody { total, events }))
+}
+
+async fn file_changes(
+    State(wiki): State<Arc<Wiki>>,
+    Params(paging): Params<Paging>,
+) -> Result<Json<FileEventsBody>, ApiError> {
+    let (total, events) = wiki
+        .read(move |_, index| {
+            index.file_events(
+                None,
+                paging.since,
+                paging.before,
+                limit(paging.limit),
+                paging.offset.unwrap_or(0),
+            )
+        })
+        .await?;
+    Ok(Json(FileEventsBody { total, events }))
+}
+
+async fn files(
+    State(wiki): State<Arc<Wiki>>,
+    Params(params): Params<FilesParams>,
+) -> Result<Json<FilesBody>, ApiError> {
+    let listing = FileListing {
+        under: params.under,
+        words: params.q,
+        sort: params.sort,
+        order: params.order,
+        limit: limit(params.limit),
+        offset: params.offset.unwrap_or(0),
+    };
+    let (total, files) = wiki.read(move |_, index| index.files(&listing)).await?;
+    Ok(Json(FilesBody { total, files }))
+}
+
+async fn file(
+    State(wiki): State<Arc<Wiki>>,
+    Path(path): Path<String>,
+    Params(slice): Params<Slice>,
+) -> Result<Json<FileBody>, ApiError> {
+    wiki.read(move |_, index| {
+        let (key, file) = index.file(&path)?;
+        let (total, events) = index.file_events(
+            Some(key),
+            None,
+            None,
+            limit(slice.limit),
+            slice.offset.unwrap_or(0),
+        )?;
+        Ok(FileBody {
+            file,
+            total,
+            events,
+        })
+    })
+    .await
+    .map(Json)
 }
 
 async fn questions(

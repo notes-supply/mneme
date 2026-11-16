@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use super::PageId;
 use super::search::MARKERS;
 use crate::markdown;
-use crate::repo::{Change, Commit, Repo};
+use crate::repo::{Change, Commit, FileChange, Repo};
 use crate::text::{self, Churn};
 
 /// What the index keeps of one blob's text.
@@ -23,6 +23,12 @@ struct PageText {
 struct Live {
     rowid: i64,
     words: u32,
+}
+
+/// The live file at a path, as it was before the commit being applied.
+struct LiveFile {
+    rowid: i64,
+    size: u64,
 }
 
 fn read(repo: &Repo, path: &str, blob: ObjectId) -> Result<PageText> {
@@ -114,7 +120,7 @@ pub(super) fn apply(tx: &Transaction<'_>, repo: &Repo, commit: &Commit) -> Resul
             (change, _) => bail!("unexpected change {change:?}"),
         }
     }
-    Ok(())
+    step.files()
 }
 
 /// The commit being applied and where its rows go.
@@ -222,6 +228,95 @@ impl Step<'_> {
         self.tx.execute(
             "UPDATE pages SET questions = ?2 WHERE rowid = ?1",
             params![rowid, i64::try_from(questions.len())?],
+        )?;
+        Ok(())
+    }
+
+    /// Applies the commit's changes to files that are not pages. As for pages, every file a
+    /// change starts from is looked up before any change is written.
+    fn files(&self) -> Result<()> {
+        let sources = self
+            .commit
+            .files
+            .iter()
+            .map(|change| match change {
+                FileChange::Added { .. } => Ok(None),
+                FileChange::Modified { path: from, .. }
+                | FileChange::Renamed { from, .. }
+                | FileChange::Deleted { path: from } => self.live_file(from).map(Some),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for (change, source) in self.commit.files.iter().zip(sources) {
+            match (change, source) {
+                (FileChange::Added { path, size }, None) => {
+                    self.tx.execute(
+                        "INSERT INTO files (path, folded, size, created, versions, last) \
+                         VALUES (?1, ?2, ?3, ?4, 1, 0)",
+                        params![path, path.to_lowercase(), size, self.commit.time],
+                    )?;
+                    let file = self.tx.last_insert_rowid();
+                    self.file_event(file, path, "created", None, *size)?;
+                }
+                (FileChange::Modified { path, size }, Some(file)) => {
+                    self.tx.execute(
+                        "UPDATE files SET size = ?2, versions = versions + 1 WHERE rowid = ?1",
+                        params![file.rowid, size],
+                    )?;
+                    self.file_event(file.rowid, path, "edited", None, *size)?;
+                }
+                (FileChange::Renamed { from, path }, Some(file)) => {
+                    self.tx.execute(
+                        "UPDATE files SET path = ?2, folded = ?3 WHERE rowid = ?1",
+                        params![file.rowid, path, path.to_lowercase()],
+                    )?;
+                    self.file_event(file.rowid, path, "renamed", Some(from), file.size)?;
+                }
+                (FileChange::Deleted { path }, Some(file)) => {
+                    self.tx.execute(
+                        "UPDATE files SET deleted = ?2 WHERE rowid = ?1",
+                        params![file.rowid, self.commit.time],
+                    )?;
+                    self.file_event(file.rowid, path, "deleted", None, 0)?;
+                }
+                (change, _) => bail!("unexpected change {change:?}"),
+            }
+        }
+        Ok(())
+    }
+
+    fn live_file(&self, path: &str) -> Result<LiveFile> {
+        self.tx
+            .query_row(
+                "SELECT rowid, size FROM files WHERE path = ?1 AND deleted IS NULL",
+                [path],
+                |row| {
+                    Ok(LiveFile {
+                        rowid: row.get(0)?,
+                        size: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+            .with_context(|| format!("no file at {path} before this commit"))
+    }
+
+    /// Records an event of a file, which is then the file's newest.
+    fn file_event(
+        &self,
+        file: i64,
+        path: &str,
+        kind: &str,
+        from: Option<&str>,
+        size: u64,
+    ) -> Result<()> {
+        self.tx.execute(
+            "INSERT INTO file_events (commit_seq, file, path, kind, from_path, size) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![self.seq, file, path, kind, from, size],
+        )?;
+        self.tx.execute(
+            "UPDATE files SET last = ?2 WHERE rowid = ?1",
+            params![file, self.tx.last_insert_rowid()],
         )?;
         Ok(())
     }

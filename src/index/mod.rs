@@ -1,4 +1,5 @@
-//! The in-memory SQLite index of pages, their versions and their text. All SQL lives here.
+//! The in-memory SQLite index of pages, their versions and their text, and of the files that
+//! are not pages. All SQL lives here.
 
 use std::time::{Duration, Instant};
 
@@ -11,9 +12,11 @@ use sha2::{Digest, Sha256};
 use crate::repo::Repo;
 
 mod apply;
+mod files;
 mod read;
 mod search;
 
+pub use files::{File, FileEvent, FileListing, FileSort};
 pub use read::{Diff, End, Filter, Listing, Missing, Order, PathMatch, Question, Sort, Window};
 pub use search::{Hit, Mark, Query, QueryError};
 
@@ -67,7 +70,7 @@ pub struct Page {
     pub deleted: Option<i64>,
 }
 
-/// What a commit did to a page.
+/// What a commit did to a page or a file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Kind {
@@ -75,6 +78,25 @@ pub enum Kind {
     Edited,
     Renamed { from: String },
     Deleted,
+}
+
+impl Kind {
+    /// Reads a kind from the column `kind`, with the old path of a rename from the column `from`.
+    fn read(row: &rusqlite::Row<'_>, kind: usize, from: usize) -> rusqlite::Result<Self> {
+        match row.get_ref(kind)?.as_str()? {
+            "created" => Ok(Self::Created),
+            "edited" => Ok(Self::Edited),
+            "renamed" => Ok(Self::Renamed {
+                from: row.get(from)?,
+            }),
+            "deleted" => Ok(Self::Deleted),
+            other => Err(rusqlite::Error::FromSqlConversionFailure(
+                kind,
+                rusqlite::types::Type::Text,
+                format!("unknown kind {other}").into(),
+            )),
+        }
+    }
 }
 
 /// One event in a page's history. It is a version when it changed the page's text.
@@ -214,26 +236,13 @@ pub(super) fn page_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
 }
 
 pub(super) fn version_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Version> {
-    let kind = match row.get_ref(5)?.as_str()? {
-        "created" => Kind::Created,
-        "edited" => Kind::Edited,
-        "renamed" => Kind::Renamed { from: row.get(6)? },
-        "deleted" => Kind::Deleted,
-        other => {
-            return Err(rusqlite::Error::FromSqlConversionFailure(
-                5,
-                rusqlite::types::Type::Text,
-                format!("unknown kind {other}").into(),
-            ));
-        }
-    };
     Ok(Version {
         commit: row.get(0)?,
         page: PageId(row.get(1)?),
         path: row.get(2)?,
         time: row.get(3)?,
         author: row.get(4)?,
-        kind,
+        kind: Kind::read(row, 5, 6)?,
         version: row.get(7)?,
         words: row.get(8)?,
         added: row.get(9)?,

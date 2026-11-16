@@ -24,6 +24,8 @@ pub enum Missing {
     Text,
     #[error("no page that is not deleted has had this path")]
     Path,
+    #[error("no file is at this path, and none was deleted there")]
+    File,
 }
 
 /// Which page a question is on.

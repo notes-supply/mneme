@@ -580,6 +580,20 @@ fn every_route_answers_in_the_shape_of_its_example_file() {
     }
 }
 
+#[test]
+fn every_route_of_files_answers_in_the_shape_of_its_example_file() {
+    let work = crate::files::brand();
+    let server = Server::of(&work);
+    let routes = [
+        ("files", "/v1/files"),
+        ("file", "/v1/files/brand/archive/Kit%202026.zip"),
+        ("file-changes", "/v1/changes/files"),
+    ];
+    for (name, path) in routes {
+        fits_example(name, &server.json(path));
+    }
+}
+
 /// Checks `actual` against the example `name` both ways, after writing it there when
 /// `MNEME_WRITE_EXAMPLES` is set.
 fn fits_example(name: &str, actual: &Value) {

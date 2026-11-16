@@ -41,6 +41,31 @@ CREATE INDEX versions_page ON versions (page, seq);
 
 CREATE INDEX versions_path ON versions (path, seq);
 
+CREATE TABLE files (
+    rowid INTEGER PRIMARY KEY,
+    path TEXT NOT NULL,
+    folded TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    created INTEGER NOT NULL,
+    versions INTEGER NOT NULL,
+    deleted INTEGER,
+    last INTEGER NOT NULL
+);
+
+CREATE INDEX files_path ON files (path);
+
+CREATE TABLE file_events (
+    seq INTEGER PRIMARY KEY,
+    commit_seq INTEGER NOT NULL REFERENCES commits (seq),
+    file INTEGER NOT NULL REFERENCES files (rowid),
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('created', 'edited', 'renamed', 'deleted')),
+    from_path TEXT,
+    size INTEGER NOT NULL
+);
+
+CREATE INDEX file_events_file ON file_events (file, seq);
+
 CREATE TABLE questions (
     page INTEGER NOT NULL REFERENCES pages (rowid),
     position INTEGER NOT NULL,

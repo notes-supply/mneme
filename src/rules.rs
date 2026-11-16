@@ -9,6 +9,10 @@ use crate::repo::is_page;
 pub const MAX_PAGE: u64 = 1 << 20;
 /// The largest file of any kind.
 pub const MAX_FILE: u64 = 10 << 20;
+/// The largest blob that the index reads into memory whole, when it looks for a page under a
+/// new name among what a commit took away and added. It is the largest file of any kind, so
+/// every history is read as it always was.
+pub const MAX_WHOLE: u64 = MAX_FILE;
 
 /// What a path holds, as Git would store it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -91,11 +91,43 @@ fn a_pushed_history_indexes_as_a_fresh_build_does() {
     assert!(ok, "{said}");
     assert_versions_match_git(&server, &work);
     let fresh = server.again(&git);
-    for path in ["/v1/pages?deleted=true", "/v1/changes?limit=500"] {
+    for path in [
+        "/v1/pages?deleted=true",
+        "/v1/changes?limit=500",
+        "/v1/files",
+        "/v1/changes/files",
+    ] {
         assert_eq!(server.get(path).body, fresh.get(path).body, "{path}");
     }
     let alpha = live_page(&server, "greek/alpha.md");
     assert_eq!(events(&server, &alpha).len(), 4);
+    let readme = server.json("/v1/files/notes/readme.txt");
+    assert_eq!(readme["file"]["versions"], 2, "one version in each push");
+}
+
+#[test]
+fn files_pushed_one_commit_at_a_time_index_as_a_fresh_build_does() {
+    let git = Isolation::new();
+    let server = Server::empty(&git);
+    let work = crate::files::brand();
+    work.ok(&["remote", "add", "origin", &server.git_url()]);
+    work.ok(&["config", "http.extraHeader", AUTHORIZATION]);
+    for behind in (0..5).rev() {
+        let (ok, said) = work.push(&["origin", &format!("main~{behind}:refs/heads/main")]);
+        assert!(ok, "{said}");
+    }
+    let fresh = server.again(&git);
+    let of_clone = Server::of(&work);
+    for path in [
+        "/v1/files",
+        "/v1/changes/files",
+        "/v1/files/brand/archive/Kit%202026.zip",
+        "/v1/files/notes/readme.txt",
+    ] {
+        let pushed = server.get(path).body;
+        assert_eq!(pushed, fresh.get(path).body, "{path}");
+        assert_eq!(pushed, of_clone.get(path).body, "{path}");
+    }
 }
 
 #[test]

@@ -21,6 +21,7 @@ pub mod init;
 pub mod log;
 pub mod machines;
 pub mod markdown;
+pub mod media;
 pub mod repo;
 pub mod rules;
 pub mod serve;

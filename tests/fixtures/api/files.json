@@ -1,0 +1,71 @@
+{
+  "files": [
+    {
+      "author": "Writer",
+      "commit": "1b6b2d8187460973c73127a3e37a7e2cab811950",
+      "created": 1788221400,
+      "deleted": null,
+      "path": "brand/archive/Kit 2026.zip",
+      "size": 3000,
+      "type": "application/octet-stream",
+      "updated": 1788222600,
+      "versions": 1
+    },
+    {
+      "author": "Writer",
+      "commit": "8c458d9dc1e316340ef5fb29b6db1cc428cdd11a",
+      "created": 1788221400,
+      "deleted": null,
+      "path": "brand/logo.svg",
+      "size": 62,
+      "type": "image/svg+xml",
+      "updated": 1788222000,
+      "versions": 2
+    },
+    {
+      "author": "Writer",
+      "commit": "f86b6b9268e8d8dd61de7e4a4f1bcfb9408e9c05",
+      "created": 1788223800,
+      "deleted": null,
+      "path": "brand/mark.png",
+      "size": 12000,
+      "type": "image/png",
+      "updated": 1788223800,
+      "versions": 1
+    },
+    {
+      "author": "Writer",
+      "commit": "6987afd1a4dd5dfa62794b248e84e09dffafd741",
+      "created": 1788223200,
+      "deleted": null,
+      "path": "brand/palette.txt",
+      "size": 26,
+      "type": "text/plain; charset=utf-8",
+      "updated": 1788223200,
+      "versions": 1
+    },
+    {
+      "author": "Writer",
+      "commit": "a75f4a67d9148128bb1b4cc2f494d997cef810e7",
+      "created": 1788221400,
+      "deleted": null,
+      "path": "brand/Årets logga 2026.png",
+      "size": 700,
+      "type": "image/png",
+      "updated": 1788221400,
+      "versions": 1
+    },
+    {
+      "author": "Writer",
+      "commit": "a75f4a67d9148128bb1b4cc2f494d997cef810e7",
+      "created": 1788221400,
+      "deleted": null,
+      "path": "brandy.txt",
+      "size": 25,
+      "type": "text/plain; charset=utf-8",
+      "updated": 1788221400,
+      "versions": 1
+    }
+  ],
+  "total": 6
+}

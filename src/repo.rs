@@ -1,13 +1,17 @@
-//! Reads the wiki's bare repository with gix: the commits of `main` and the pages they change.
+//! Reads the wiki's bare repository with gix: the commits of `main`, and the pages and the other
+//! files they change.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use gix::ObjectId;
-use gix::bstr::BStr;
+use gix::bstr::{BStr, ByteSlice};
 use gix::diff::Rewrites;
 use gix::object::tree::diff::ChangeDetached;
 use gix::objs::tree::EntryMode;
+
+use crate::rules;
 
 /// The branch that holds the wiki. The push check keeps every other ref out.
 pub const MAIN: &str = "refs/heads/main";
@@ -21,7 +25,7 @@ pub const NO_OBJECT: &str = "0000000000000000000000000000000000000000";
 #[error("commit {0} is not on {MAIN}")]
 pub struct NotOnMain(pub ObjectId);
 
-/// One commit of `main` and the pages it changed.
+/// One commit of `main`, the pages it changed and the other files it changed.
 #[derive(Debug)]
 pub struct Commit {
     pub id: ObjectId,
@@ -32,6 +36,7 @@ pub struct Commit {
     /// a side.
     pub overlap: Option<String>,
     pub changes: Vec<Change>,
+    pub files: Vec<FileChange>,
 }
 
 /// A change to one page file. Renames come from gix's rewrite tracking.
@@ -58,6 +63,16 @@ pub enum Change {
     },
 }
 
+/// A change to one file that is not a page. Its bytes are never read: the size comes from the
+/// blob's header, and a rename is the same blob at another path.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FileChange {
+    Added { path: String, size: u64 },
+    Modified { path: String, size: u64 },
+    Renamed { from: String, path: String },
+    Deleted { path: String },
+}
+
 /// The wiki's repository, opened on one thread.
 pub struct Repo {
     repo: gix::Repository,
@@ -70,7 +85,13 @@ impl Repo {
     ///
     /// Fails when `path` is not a Git repository.
     pub fn open(path: &Path) -> Result<Self> {
-        let mut repo = gix::open(path)
+        // A page is found again under a new name by comparing what a commit took away with
+        // what it added, files that are not pages among them. gix reads no blob over this size
+        // for that. The repository's own setting is for Git, which the server tells to stream
+        // every blob over a page's size, and what the index reads must not move with it.
+        let options = gix::open::Options::default()
+            .config_overrides([format!("core.bigFileThreshold={}", rules::MAX_WHOLE)]);
+        let mut repo = gix::open_opts(path, options)
             .with_context(|| format!("opening the repository at {}", path.display()))?;
         repo.object_cache_size_if_unset(4 << 20);
         Ok(Self { repo })
@@ -144,51 +165,101 @@ fn commit(repo: &gix::Repository, id: ObjectId) -> Result<Commit> {
         ..Rewrites::default()
     };
     let options = gix::diff::Options::default().with_rewrites(Some(rewrites));
-    let changes = repo
-        .diff_tree_to_tree(old_tree.as_ref(), &new_tree, options)?
-        .into_iter()
-        .filter_map(page_change)
-        .collect();
+    let mut changes = Vec::new();
+    let mut files = Vec::new();
+    let (mut gone, mut came) = (Vec::new(), Vec::new());
+    for change in repo.diff_tree_to_tree(old_tree.as_ref(), &new_tree, options)? {
+        let (before, after) = ends(change);
+        let (page_before, file_before) = by_kind(before);
+        let (page_after, file_after) = by_kind(after);
+        changes.extend(page_change(page_before, page_after));
+        match (file_before, file_after) {
+            (Some(before), Some(after)) if before.path == after.path => {
+                if before.blob != after.blob {
+                    files.push(FileChange::Modified {
+                        size: size(repo, after.blob)?,
+                        path: after.path,
+                    });
+                }
+            }
+            (before, after) => {
+                gone.extend(before);
+                came.extend(after);
+            }
+        }
+    }
+    for moved in moves(gone, came) {
+        files.push(match moved {
+            Moved::Renamed { from, path } => FileChange::Renamed { from, path },
+            Moved::Deleted(path) => FileChange::Deleted { path },
+            Moved::Added(entry) => FileChange::Added {
+                size: size(repo, entry.blob)?,
+                path: entry.path,
+            },
+        });
+    }
     Ok(Commit {
         id,
         time: author.seconds(),
         author: author.name.to_string(),
         overlap,
         changes,
+        files,
     })
 }
 
-/// Whether a file at `path` is a page. Other files are stored by Git and not indexed.
+/// The size of a blob, from its header.
+fn size(repo: &gix::Repository, blob: ObjectId) -> Result<u64> {
+    Ok(repo.find_header(blob)?.size())
+}
+
+/// Whether a file at `path` is a page. Any other regular file is a file, which the index lists
+/// without reading.
 #[must_use]
 pub fn is_page(path: &[u8]) -> bool {
     path.ends_with(b".md")
 }
 
-fn page(location: &BStr, mode: EntryMode) -> Option<String> {
-    (mode.is_blob() && is_page(location)).then(|| location.to_string())
+/// A regular file at a path in a tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Entry {
+    path: String,
+    blob: ObjectId,
+    page: bool,
 }
 
-/// The change to page files, seen from what was a page before and what is a page after.
-fn page_change(change: ChangeDetached) -> Option<Change> {
-    let (before, after) = match change {
+fn entry(location: &BStr, mode: EntryMode, blob: ObjectId) -> Option<Entry> {
+    mode.is_blob().then(|| Entry {
+        path: location.to_string(),
+        blob,
+        page: is_page(location),
+    })
+}
+
+/// An entry as a page, or as a file that is not one.
+fn by_kind(entry: Option<Entry>) -> (Option<Entry>, Option<Entry>) {
+    match entry {
+        Some(entry) if entry.page => (Some(entry), None),
+        other => (None, other),
+    }
+}
+
+/// The regular file a change took from a path and the one it left at a path, seen from the
+/// path's side: an edit in place takes and leaves at the same path.
+fn ends(change: ChangeDetached) -> (Option<Entry>, Option<Entry>) {
+    match change {
         ChangeDetached::Addition {
             location,
             entry_mode,
             id,
             ..
-        } => (
-            None,
-            page(location.as_ref(), entry_mode).map(|path| (path, id)),
-        ),
+        } => (None, entry(location.as_bstr(), entry_mode, id)),
         ChangeDetached::Deletion {
             location,
             entry_mode,
             id,
             ..
-        } => (
-            page(location.as_ref(), entry_mode).map(|path| (path, id)),
-            None,
-        ),
+        } => (entry(location.as_bstr(), entry_mode, id), None),
         ChangeDetached::Modification {
             location,
             previous_entry_mode,
@@ -196,8 +267,8 @@ fn page_change(change: ChangeDetached) -> Option<Change> {
             entry_mode,
             id,
         } => (
-            page(location.as_ref(), previous_entry_mode).map(|path| (path, previous_id)),
-            page(location.as_ref(), entry_mode).map(|path| (path, id)),
+            entry(location.as_bstr(), previous_entry_mode, previous_id),
+            entry(location.as_bstr(), entry_mode, id),
         ),
         ChangeDetached::Rewrite {
             source_location,
@@ -210,26 +281,105 @@ fn page_change(change: ChangeDetached) -> Option<Change> {
             ..
         } => (
             (!copy)
-                .then(|| page(source_location.as_ref(), source_entry_mode))
-                .flatten()
-                .map(|path| (path, source_id)),
-            page(location.as_ref(), entry_mode).map(|path| (path, id)),
+                .then(|| entry(source_location.as_bstr(), source_entry_mode, source_id))
+                .flatten(),
+            entry(location.as_bstr(), entry_mode, id),
         ),
-    };
+    }
+}
+
+/// The change to page files, seen from what was a page before and what is a page after.
+fn page_change(before: Option<Entry>, after: Option<Entry>) -> Option<Change> {
     match (before, after) {
         (None, None) => None,
-        (None, Some((path, blob))) => Some(Change::Added { path, blob }),
-        (Some((path, from_blob)), None) => Some(Change::Deleted { path, from_blob }),
-        (Some((from, from_blob)), Some((path, blob))) if from == path => Some(Change::Modified {
-            path,
-            from_blob,
-            blob,
+        (None, Some(after)) => Some(Change::Added {
+            path: after.path,
+            blob: after.blob,
         }),
-        (Some((from, from_blob)), Some((path, blob))) => Some(Change::Renamed {
-            from,
-            path,
-            from_blob,
-            blob,
+        (Some(before), None) => Some(Change::Deleted {
+            path: before.path,
+            from_blob: before.blob,
         }),
+        (Some(before), Some(after)) if before.path == after.path => Some(Change::Modified {
+            path: after.path,
+            from_blob: before.blob,
+            blob: after.blob,
+        }),
+        (Some(before), Some(after)) => Some(Change::Renamed {
+            from: before.path,
+            path: after.path,
+            from_blob: before.blob,
+            blob: after.blob,
+        }),
+    }
+}
+
+/// What became of a file that left its path or came to one.
+#[derive(Debug, PartialEq, Eq)]
+enum Moved {
+    Renamed { from: String, path: String },
+    Deleted(String),
+    Added(Entry),
+}
+
+/// Pairs the files a commit took from their paths with the files it left at new ones. A file
+/// is renamed when the same blob is gone from one path and has come to another, and nothing
+/// else is: no file is compared with another. Several files with the same bytes pair in path
+/// order.
+fn moves(mut gone: Vec<Entry>, mut came: Vec<Entry>) -> Vec<Moved> {
+    gone.sort_by(|a, b| a.path.cmp(&b.path));
+    came.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut sources: HashMap<ObjectId, VecDeque<String>> = HashMap::new();
+    let mut moved = Vec::with_capacity(gone.len() + came.len());
+    for entry in gone {
+        sources.entry(entry.blob).or_default().push_back(entry.path);
+    }
+    for entry in came {
+        let from = sources.get_mut(&entry.blob).and_then(VecDeque::pop_front);
+        moved.push(match from {
+            Some(from) => Moved::Renamed {
+                from,
+                path: entry.path,
+            },
+            None => Moved::Added(entry),
+        });
+    }
+    let mut deleted: Vec<String> = sources.into_values().flatten().collect();
+    deleted.sort();
+    moved.extend(deleted.into_iter().map(Moved::Deleted));
+    moved
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(path: &str, blob: u8) -> Entry {
+        Entry {
+            path: path.to_owned(),
+            blob: ObjectId::from([blob; 20]),
+            page: false,
+        }
+    }
+
+    #[test]
+    fn a_file_is_renamed_only_when_the_same_blob_left_one_path_and_came_to_another() {
+        let moved = moves(
+            vec![file("b.zip", 1), file("a.zip", 1), file("gone.png", 2)],
+            vec![file("y.zip", 1), file("new.png", 3), file("x.zip", 1)],
+        );
+        let renamed = |from: &str, path: &str| Moved::Renamed {
+            from: from.to_owned(),
+            path: path.to_owned(),
+        };
+        assert_eq!(
+            moved,
+            [
+                Moved::Added(file("new.png", 3)),
+                renamed("a.zip", "x.zip"),
+                renamed("b.zip", "y.zip"),
+                Moved::Deleted("gone.png".to_owned()),
+            ]
+        );
     }
 }

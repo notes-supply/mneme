@@ -2,6 +2,7 @@ mod api;
 mod autosave;
 mod cli;
 mod edit;
+mod files;
 mod folder;
 mod follow;
 mod git;
