@@ -12,6 +12,7 @@ mod install;
 mod kill;
 mod machines;
 mod push;
+mod raw;
 mod remote;
 mod server;
 mod simulation;

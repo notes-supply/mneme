@@ -56,7 +56,10 @@ pub struct Server {
 pub struct Reply {
     pub status: u16,
     pub headers: Vec<(String, String)>,
+    /// The body as text, with bytes that are not UTF-8 replaced.
     pub body: String,
+    /// The body as it was sent.
+    pub bytes: Vec<u8>,
 }
 
 impl Reply {
@@ -104,6 +107,7 @@ impl Reply {
             status,
             headers,
             body: String::from_utf8_lossy(&body).into_owned(),
+            bytes: body,
         }
     }
 }

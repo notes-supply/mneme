@@ -81,6 +81,10 @@ fn a_folder_answers_as_the_server_does_with_no_git_and_writes_nothing() {
     ] {
         assert_eq!(server.json(route), of_repo.json(route), "{route}");
     }
+    assert_eq!(
+        server.get("/v1/raw/notes/readme.txt").body,
+        "Still not a page.\n"
+    );
     assert_eq!(status(&server), status(&of_repo));
     let id = server.json("/v1/pages")["pages"][0]["id"]
         .as_str()
@@ -132,6 +136,10 @@ fn a_folder_follows_new_commits_and_builds_again_after_a_reset() {
         server.json("/v1/files/notes/readme.txt")["file"]["versions"],
         2
     );
+    assert_eq!(
+        server.get("/v1/raw/new.txt").body,
+        "A file after the start.\n"
+    );
     assert!(
         server
             .log_with(r#""event":"followed""#)
@@ -171,12 +179,14 @@ fn a_folder_follows_new_commits_and_builds_again_after_a_reset() {
         "the reset took the new file away: {files}"
     );
     assert_eq!(server.get("/v1/files/new.txt").status, 404);
+    assert_eq!(server.get("/v1/raw/new.txt").status, 404);
     let readme = server.json("/v1/files/notes/readme.txt");
     assert_eq!(
         (&readme["file"]["versions"], &readme["total"]),
         (&1.into(), &1.into()),
         "and the readme's edit, so its history was built again"
     );
+    assert_eq!(server.get("/v1/raw/notes/readme.txt").body, "Not a page.\n");
 }
 
 #[test]

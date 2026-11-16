@@ -193,6 +193,12 @@ impl Index {
         self.head.map(|head| head.to_string())
     }
 
+    /// The last commit on `main` that the index holds, as an object id.
+    #[must_use]
+    pub fn head_id(&self) -> Option<ObjectId> {
+        self.head
+    }
+
     /// Head commit, page and commit counts and the build time.
     ///
     /// # Errors

@@ -23,14 +23,15 @@ use crate::index::{
 use crate::machines::Health;
 use crate::serve::Wiki;
 use crate::text::{self, DiffLine};
-use crate::{index, log, now};
+use crate::{index, log, now, raw};
 
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 500;
 
-/// The routes under `/v1`.
-pub fn router(wiki: Arc<Wiki>) -> Router {
-    Router::new()
+/// The routes under `/v1`. `private` is set when they ask for a token, which a file's bytes
+/// tell a cache.
+pub fn router(wiki: Arc<Wiki>, private: bool) -> Router {
+    let json = Router::new()
         .route("/v1/status", get(status))
         .route("/v1/pages", get(pages))
         .route("/v1/pages/{id}", get(page))
@@ -47,7 +48,10 @@ pub fn router(wiki: Arc<Wiki>) -> Router {
         .route("/v1/machines", get(machines))
         .fallback(|| async { ApiError::NotFound("no such route".to_owned()) })
         .layer(middleware::from_fn(etag))
-        .with_state(wiki)
+        .with_state(Arc::clone(&wiki));
+    // A file's bytes are sent as they are read, so they stay outside the layer above, which
+    // holds a whole body to hash it.
+    raw::router(wiki, private).merge(json)
 }
 
 /// An error answered as `{ "error": "..." }`.
@@ -91,7 +95,7 @@ impl IntoResponse for ApiError {
 }
 
 /// Query parameters, with a JSON 400 when they do not parse.
-struct Params<T>(T);
+pub(crate) struct Params<T>(pub T);
 
 impl<S: Send + Sync, T: DeserializeOwned> FromRequestParts<S> for Params<T> {
     type Rejection = ApiError;
@@ -490,7 +494,7 @@ async fn etag(request: Request, next: Next) -> Result<Response, ApiError> {
 }
 
 /// Whether an `If-None-Match` value names `tag`. The comparison is weak, as RFC 9110 asks.
-fn matches(known: &HeaderValue, tag: &HeaderValue) -> bool {
+pub(crate) fn matches(known: &HeaderValue, tag: &HeaderValue) -> bool {
     let Ok(known) = known.to_str() else {
         return false;
     };

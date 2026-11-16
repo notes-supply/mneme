@@ -11,7 +11,7 @@ use gix::diff::Rewrites;
 use gix::object::tree::diff::ChangeDetached;
 use gix::objs::tree::EntryMode;
 
-use crate::rules;
+use crate::{blob, rules};
 
 /// The branch that holds the wiki. The push check keeps every other ref out.
 pub const MAIN: &str = "refs/heads/main";
@@ -144,6 +144,52 @@ impl Repo {
     pub fn text(&self, blob: ObjectId) -> Result<String> {
         let blob = self.repo.find_blob(blob)?;
         Ok(String::from_utf8_lossy(&blob.data).into_owned())
+    }
+
+    /// The blob of the regular file at `path` in the tree of `commit`, or `None` when nothing is
+    /// there or what is there is a folder, a symlink or a submodule.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the commit or one of its trees cannot be read.
+    pub fn file_at(&self, commit: ObjectId, path: &str) -> Result<Option<ObjectId>> {
+        let mut tree = self.repo.find_commit(commit)?.tree()?;
+        let mut parts = path.split('/').peekable();
+        while let Some(part) = parts.next() {
+            let Some((mode, id)) = tree
+                .find_entry(part)
+                .map(|entry| (entry.mode(), entry.object_id()))
+            else {
+                return Ok(None);
+            };
+            if parts.peek().is_none() {
+                return Ok(mode.is_blob().then_some(id));
+            }
+            // A submodule holds a commit of another repository, which has no tree here.
+            if !mode.is_tree() {
+                return Ok(None);
+            }
+            tree = self.repo.find_tree(id)?;
+        }
+        Ok(None)
+    }
+
+    /// The size of a blob in bytes, from its header.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the blob cannot be found.
+    pub fn blob_size(&self, blob: ObjectId) -> Result<u64> {
+        size(&self.repo, blob)
+    }
+
+    /// Opens a blob to read its bytes in order.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the blob cannot be found or read.
+    pub fn open_blob(&self, blob: ObjectId) -> Result<blob::Reader> {
+        blob::Reader::open(&self.repo, blob)
     }
 }
 

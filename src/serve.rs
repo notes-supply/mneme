@@ -211,7 +211,7 @@ async fn serve_repo(path: PathBuf, args: &Args) -> Result<()> {
     let wiki = Arc::new(wiki);
     let (stop, stopped) = oneshot::channel();
     let saving = tokio::spawn(save_machines(Arc::clone(&wiki), stopped));
-    let mut reading = api::router(Arc::clone(&wiki));
+    let mut reading = api::router(Arc::clone(&wiki), args.private_api);
     if args.private_api {
         let tokens = Arc::clone(&tokens);
         reading = reading.layer(middleware::from_fn_with_state(tokens, auth::any_token));
@@ -262,7 +262,7 @@ async fn serve_folder(folder: &Path, args: &Args) -> Result<()> {
     let following = tokio::spawn(follow(Arc::clone(&wiki)));
     let router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .merge(api::router(wiki))
+        .merge(api::router(wiki, false))
         .layer(middleware::from_fn(loopback_host))
         .layer(middleware::from_fn(request_log));
     listen(addr, router, stopping).await?;
