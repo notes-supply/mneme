@@ -322,7 +322,7 @@ fn a_good_release_installs_both_apps_and_atriums_unit_without_enabling_it() {
     for line in [
         format!("Installed atrium {TAG}, mneme {TAG} in"),
         "is already there, and was left as it is".to_owned(),
-        "goes on with it until it restarts: systemctl --user try-restart mneme-autosave atrium"
+        "goes on with it until it restarts: systemctl --user try-restart 'mneme-autosave*' atrium"
             .to_owned(),
     ] {
         assert!(said.contains(&line), "{line}: {said}");

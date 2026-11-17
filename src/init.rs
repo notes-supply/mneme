@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::autosave::{self, Ready, Remote, RemoteArgs, Settings};
 
-/// The unit's name, and its file's.
+/// The unit of the wiki in `~/wiki`, the folder `mneme init` takes by default.
 const UNIT: &str = "mneme-autosave.service";
 /// The unit as a template. Each `@NAME@` is filled in.
 const TEMPLATE: &str = include_str!("mneme-autosave.service");
@@ -62,7 +62,9 @@ pub fn run(args: &Args) -> Result<()> {
     let systemctl = on_path("systemctl");
     let unit = match &systemctl {
         Some(systemctl) if !args.no_service => {
-            let path = config_home(&home).join("systemd/user").join(UNIT);
+            let path = config_home(&home)
+                .join("systemd/user")
+                .join(unit_name(&home, &folder));
             let text = unit(&command, &folder, &remote, args.follow)?;
             if !args.force && fs::read_to_string(&path).is_ok_and(|installed| installed != text) {
                 bail!(
@@ -104,16 +106,45 @@ pub fn run(args: &Args) -> Result<()> {
         return Ok(());
     };
     let replaced = install(&path, &text)?;
+    let unit = unit_name(&home, &folder);
     systemctl_user(systemctl, &["daemon-reload"])?;
-    systemctl_user(systemctl, &["enable", "--now", UNIT])?;
+    systemctl_user(systemctl, &["enable", "--now", &unit])?;
     if replaced {
-        systemctl_user(systemctl, &["try-restart", UNIT])?;
+        systemctl_user(systemctl, &["try-restart", &unit])?;
     }
     println!(
-        "Installed {} and started it. Its logs: journalctl --user -u mneme-autosave",
-        path.display()
+        "Installed {} and started it. Its logs: journalctl --user -u {}",
+        path.display(),
+        unit.trim_end_matches(".service")
     );
     Ok(())
+}
+
+/// The unit that keeps `folder`, so that each folder has a service of its own: `UNIT` for
+/// `~/wiki`, which machines set up before had, and otherwise `mneme-autosave-NAME.service`,
+/// NAME being the folder's path under the home folder, or its own name outside it, in
+/// lower-case letters, digits and single hyphens. Two folders whose names come out the same
+/// write different units, so the second is refused without `--force`.
+fn unit_name(home: &Path, folder: &Path) -> String {
+    if folder == home.join("wiki") {
+        return UNIT.to_owned();
+    }
+    let named = folder
+        .strip_prefix(home)
+        .ok()
+        .filter(|under| !under.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new(folder.file_name().unwrap_or(folder.as_os_str())));
+    let mut name = String::new();
+    for c in named.to_string_lossy().chars() {
+        if c.is_ascii_alphanumeric() {
+            name.push(c.to_ascii_lowercase());
+        } else if !name.is_empty() && !name.ends_with('-') {
+            name.push('-');
+        }
+    }
+    let name = name.trim_end_matches('-');
+    let name = if name.is_empty() { "folder" } else { name };
+    format!("mneme-autosave-{name}.service")
 }
 
 fn home() -> Result<PathBuf> {
@@ -345,6 +376,26 @@ mod tests {
             shell_word("https://host/~me/wiki.git"),
             "'https://host/~me/wiki.git'"
         );
+    }
+
+    #[test]
+    fn each_folder_has_a_unit_of_its_own_and_the_default_one_keeps_its_old_name() {
+        let home = Path::new("/home/ada");
+        for (folder, unit) in [
+            ("/home/ada/wiki", "mneme-autosave.service"),
+            (
+                "/home/ada/shebang/wiki",
+                "mneme-autosave-shebang-wiki.service",
+            ),
+            (
+                "/home/ada/Shebang/The Intranet",
+                "mneme-autosave-shebang-the-intranet.service",
+            ),
+            ("/srv/team notes", "mneme-autosave-team-notes.service"),
+            ("/home/ada/.wiki", "mneme-autosave-wiki.service"),
+        ] {
+            assert_eq!(unit_name(home, Path::new(folder)), unit, "{folder}");
+        }
     }
 
     #[test]

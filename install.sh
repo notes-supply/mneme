@@ -225,7 +225,7 @@ main() {
     say "Each binary matched its release's SHA256SUMS. cosign is not on PATH, so only the checksums were checked; to check the signatures too, see $docs/install.md#verify-a-download"
   fi
   if [ "$replaced" = yes ]; then
-    say "A service that was running the old version goes on with it until it restarts: systemctl --user try-restart mneme-autosave atrium"
+    say "A service that was running the old version goes on with it until it restarts: systemctl --user try-restart 'mneme-autosave*' atrium"
   fi
   unit=no
   reload=no
