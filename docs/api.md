@@ -1,8 +1,8 @@
 # Reading API
 
-Every reading route is `GET`, lives under `/v1`, and answers with JSON, except [`/v1/raw`](#get-v1rawpath), which answers with a file's bytes. By default there is no authentication at this layer; the network keeps it private. `mneme serve --repo` also has [editing routes](#editing), which commit a change to `main` and always ask for a token that may write. The machines' reports, which `/v1/machines` lists, arrive on the Git routes with a machine's token, as described [at the end](#reports).
+Every reading route is `GET`, lives under `/v1`, and answers with JSON, except [`/v1/raw`](#get-v1rawpath), which answers with a file's bytes. By default there is no authentication at this layer; the network keeps it private. `mneme serve --repo` also has [editing routes](#editing), which commit a change to `main` and always ask for a token that may write, and [routes that manage machines](#managing-machines), which always ask for an admin token. The machines' reports, which `/v1/machines` lists, arrive on the Git routes with a machine's token, as described [at the end](#reports).
 
-`mneme serve --repo` with `--private-api` asks every `/v1` route for `Authorization: Bearer <token>`, with any token from the tokens file, read-only or not. A request without one, or with one the server does not know, is `401` with `WWW-Authenticate: Bearer` and no body, as on the Git routes, whatever route it names. `/healthz` stays open.
+`mneme serve --repo` with `--private-api` asks every `/v1` route for `Authorization: Bearer <token>`, with any token the server knows, from the tokens file or [added through the API](#managing-machines), of any access. A request without one, or with one the server does not know, is `401` with `WWW-Authenticate: Bearer` and no body, as on the Git routes, whatever route it names. `/healthz` stays open.
 
 `mneme serve --folder DIR` serves the same routes for a clone on the same machine, from `main` in `DIR/.git`, which it follows. It listens on a loopback address only, `127.0.0.1:8081` unless `--addr` says otherwise, and answers `421` with `{ "error" }` to any request whose `Host` is not `localhost`, `127.0.0.1` or `[::1]`, with any port. There `/v1/machines` is always empty, and there are no Git routes.
 
@@ -190,7 +190,7 @@ Nothing is ever sent as `text/html`. The policy is `default-src 'none'; style-sr
 
 ## `GET /v1/machines`
 
-Every machine in the tokens file, by name, as `{ "total", "machines": [Machine] }`. The server keeps this in `mneme/machines.json` inside the bare repository, so it survives a restart. A change is written within 3 seconds and at a clean stop, so a crash loses at most the last few seconds.
+Every machine the server has a token for, from the tokens file or [added through the API](#managing-machines), by name, as `{ "total", "machines": [Machine] }`. The server keeps this in `mneme/machines.json` inside the bare repository, so it survives a restart. A change is written within 3 seconds and at a clean stop, so a crash loses at most the last few seconds.
 
 A `Machine` has `name`, `seen` (when it last made a Git request with its token that carried no report, so its last fetch or push), `reported` (when its last report arrived), the `state`, `detail`, `head`, `skipped` and `skipped_more` of that report, `current`, which is `true` when the reported head is the server's head, and `behind_since`, the server's time when the two heads first differed. Every field but `name` and `current` is `null` until the machine has done that, and `behind_since` is `null` again while the heads are the same.
 
@@ -226,6 +226,28 @@ Moves the page at `from` to `to`, with `{ "from", "to", "base", "author", "messa
 
 Example: [`move.json`](../tests/fixtures/api/move.json). A conflict: [`conflict.json`](../tests/fixtures/api/conflict.json).
 
+## Managing machines
+
+`mneme serve --repo` takes new machines, and removes them, while it runs, with no restart and no change to the tokens file. Each route asks for `Authorization: Bearer <token>` with an admin token, one that the tokens file gives `"access": "admin"`, with or without `--private-api`: without a token the server knows it is `401` with no body, and with any other token `403` with `{ "error" }`. A body is JSON as for the [editing routes](#editing), with the same `400`, `415`, `413` and `422`.
+
+A machine added here may fetch, report and read, and with `write` also push and edit, exactly like one of the tokens file with that access. It is never an admin. Its next request after a change sees the change, so a removed machine's next request is `401`. The server keeps these machines in `mneme/tokens.json` inside the bare repository, beside `mneme/machines.json`, so they survive a restart; the file holds names, hashes, access and times, and never a token. `/v1/machines` lists them with the others. The request log names the admin who made each change and the machine it was about, as a `token added` or `token removed` line, and never holds a token or a hash.
+
+A name is 1 to 64 lowercase letters, digits, `.`, `_` and `-`, and starts with a letter or a digit; any other is `422`. A name that the tokens file has, in any case, is `409` on both routes, so a machine added here can never take the place of one the operator configured. So is a hash that another machine has.
+
+### `GET /v1/tokens`
+
+The machines added through the API, by name, as `{ "total", "tokens": [{ "name", "access", "added" }] }`. `access` is `read` or `write`, and `added` is when the machine was last added or replaced. There is never a hash.
+
+Example: [`tokens.json`](../tests/fixtures/api/tokens.json).
+
+### `PUT /v1/tokens/{name}`
+
+Adds the machine `name`, or replaces its hash and access, with `{ "sha256", "access" }`. `sha256` is the SHA-256 of the machine's token as 64 hexadecimal characters, so the server never sees the token, and `access` is `read` or `write` and must be there. The answer is `201` for a new machine and `200` for a replaced one, with `{ "name", "access", "added" }`. A replaced machine's old token is refused from then on, and what `/v1/machines` knows of it stays.
+
+### `DELETE /v1/tokens/{name}`
+
+Removes the machine `name`, which was added through the API. The answer is `204` with no body, and `404` with `{ "error" }` when no machine of that name was added. Its next request is `401`, and `/v1/machines` no longer lists it.
+
 ## Reports
 
 An autosave service reports its state in a `Mneme-Report` header on a Git request, which it makes with `git ls-remote` and its token. Git sends it, so the report takes the same path and trusts the same certificates as syncing. The header's value is the report's JSON in base64, `{ "state", "detail", "head", "skipped", "skipped_more" }`. `state` is a short word such as `idle` or `blocked`, `detail` says why or is empty, and `head` is the clone's `main` as a full commit id, or `null` when the folder could not be read. `skipped` lists, by path, up to 20 files the service leaves in the folder and out of every save, each as `{ "path", "reason" }`, and `skipped_more` counts the rest. A long list is cut shorter so that the header stays under 4 KiB. The reasons are:
@@ -241,7 +263,7 @@ An autosave service reports its state in a `Mneme-Report` header on a Git reques
 
 The server stores the report and answers the Git request as usual. A request that carries a report does not change `seen`. A header over 4 KiB is `413`, one that is not base64 or not JSON is `400`, and a report with missing or unknown fields or bad values is `422`, each with `{ "error" }` and without running the Git request. A request without the right token is `401` with no body, whatever it carries.
 
-A machine whose token is read-only (`"access": "read"` in the tokens file) may fetch and report like any other. A push with it is refused before Git runs: `info/refs?service=git-receive-pack` and `git-receive-pack` answer `403` with a one-line `text/plain` reason, which Git shows to the user, and store nothing.
+A machine whose token is read-only (`"access": "read"` in the tokens file or [through the API](#managing-machines)) may fetch and report like any other. A push with it is refused before Git runs: `info/refs?service=git-receive-pack` and `git-receive-pack` answer `403` with a one-line `text/plain` reason, which Git shows to the user, and store nothing.
 
 The autosave service sends these states. The detail is empty unless the list says otherwise.
 

@@ -33,7 +33,7 @@ mneme init --remote https://github.com/your-team/wiki.git --token-file ~/.config
 
 The token is sent as the password of HTTP Basic authentication, to that URL alone, and is never written to Git's configuration or a log. A host that wants the token's user name takes it in the URL, as `https://name@host/wiki.git`. A URL that holds a password is refused.
 
-**A Mneme server.** The server's tokens file names this machine as `--name` does, and the token file holds its token ([deploy.md](deploy.md) runs a server):
+**A Mneme server.** The server's tokens file, or an admin [through the API](api.md#managing-machines), names this machine as `--name` does, and the token file holds its token ([deploy.md](deploy.md) runs a server):
 
 ```sh
 mneme init --server https://mneme.example --token-file ~/.config/mneme/token
@@ -97,9 +97,9 @@ A plain remote stores what it is sent. It has no push check, so a commit made by
 | Option | |
 |---|---|
 | `--repo DIR` | The wiki's bare repository, created when it is missing. A server: Git over `/git/wiki.git`, the push check, machine state and the reading API. |
-| `--tokens FILE` | With `--repo`: a JSON object that maps each machine's name to the SHA-256 of its token, or to `{ "sha256", "access" }` with `access` `read` or `write` ([deploy.md](deploy.md#run-a-server)). |
+| `--tokens FILE` | With `--repo`: a JSON object that maps each machine's name to the SHA-256 of its token, or to `{ "sha256", "access" }` with `access` `read`, `write` or `admin` ([deploy.md](deploy.md#run-a-server)). An admin token may [add and remove machines](api.md#managing-machines) while the server runs. |
 | `--tokens-env NAME` | Instead of `--tokens`: the same JSON from the environment variable `NAME`. |
-| `--private-api` | With `--repo`: every `/v1` route asks for a token from the tokens file, read-only or not. |
+| `--private-api` | With `--repo`: every `/v1` route asks for a token the server knows, of any access. |
 | `--folder DIR` | Instead of `--repo`: only the reading API of a clone on this machine, on loopback. |
 | `--addr ADDR` | Where to listen. `127.0.0.1:8080` with `--repo`, `127.0.0.1:8081` with `--folder`. |
 

@@ -16,9 +16,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result, anyhow, bail};
 use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Request, State};
 use axum::http::StatusCode;
-use axum::http::header::{AUTHORIZATION, RETRY_AFTER};
+use axum::http::header::RETRY_AFTER;
 use axum::http::request::Parts;
-use axum::middleware::{self, Next};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{post, put};
 use axum::{Extension, Json, Router};
@@ -28,7 +28,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::api::ApiError;
-use crate::auth::{Access, Machine, Tokens, unauthorized};
+use crate::auth::{self, Machine, Need, Tokens};
 use crate::index::{Page, PageId};
 use crate::repo::{EMPTY_TREE, MAIN, NO_OBJECT};
 use crate::rules::{self, Entry};
@@ -59,37 +59,26 @@ pub fn router(wiki: Arc<Wiki>, tokens: Arc<Tokens>) -> Router {
         .route("/v1/paths/{*path}", put(write).delete(remove))
         .route("/v1/moves", post(rename))
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .layer(middleware::from_fn_with_state(tokens, write_token))
+        .layer(middleware::from_fn_with_state(
+            (tokens, Need::Write),
+            auth::guard,
+        ))
         .with_state(editor)
 }
 
-/// Lets a request through only with a token that may write, and gives the handler its machine.
-/// A read-only token is 403, and no token or an unknown one 401 with no body.
-async fn write_token(
-    State(tokens): State<Arc<Tokens>>,
-    mut request: Request,
-    next: Next,
-) -> Response {
-    let (machine, access) = match tokens.machine(request.headers().get(AUTHORIZATION)) {
-        Some((machine, access)) => (Machine(machine.to_owned()), access),
-        None => return unauthorized(),
-    };
-    let mut response = if access == Access::Write {
-        request.extensions_mut().insert(machine.clone());
-        next.run(request).await
-    } else {
-        let error = format!("{} has a read-only token, which may not edit", machine.0);
-        (StatusCode::FORBIDDEN, Json(json!({ "error": error }))).into_response()
-    };
-    response.extensions_mut().insert(machine);
-    response
+/// A URL or a body that did not parse, answered as `{ "error" }` with the status axum gives it.
+#[derive(Debug)]
+pub(crate) struct Unreadable(StatusCode, String);
+
+impl IntoResponse for Unreadable {
+    fn into_response(self) -> Response {
+        (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
 }
 
 /// Why a change was not made, answered as JSON.
 #[derive(Debug)]
 enum Refusal {
-    /// A path or a body that did not parse, with the status axum gives it.
-    Unreadable(StatusCode, String),
     /// The change would break a rule of the wiki, or the request has a bad value: 422.
     Rule(String),
     /// The page is not as the client saw it: 409, with the commit of its newest event now.
@@ -122,7 +111,6 @@ impl From<ApiError> for Refusal {
 impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
         let (status, body) = match self {
-            Self::Unreadable(status, error) => (status, json!({ "error": error })),
             Self::Rule(error) => (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": error })),
             Self::Conflict { error, current } => (
                 StatusCode::CONFLICT,
@@ -147,30 +135,31 @@ impl IntoResponse for Refusal {
 /// A JSON body, refused as `{ "error" }` with axum's status when it does not parse: 400 for bad
 /// JSON, 415 without `Content-Type: application/json`, 413 when too long and 422 for a body of
 /// the wrong shape.
-struct Body<T>(T);
+pub(crate) struct Body<T>(pub T);
 
 impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
-    type Rejection = Refusal;
+    type Rejection = Unreadable;
 
-    async fn from_request(request: Request, state: &S) -> Result<Self, Refusal> {
+    async fn from_request(request: Request, state: &S) -> Result<Self, Unreadable> {
         Json::<T>::from_request(request, state)
             .await
             .map(|Json(body)| Self(body))
-            .map_err(|rejection| Refusal::Unreadable(rejection.status(), rejection.body_text()))
+            .map_err(|rejection| Unreadable(rejection.status(), rejection.body_text()))
     }
 }
 
-/// The page's path from the URL, decoded, or 400 as JSON when it is not UTF-8.
-struct PagePath(String);
+/// The URL's one parameter, such as a page's path, decoded, or 400 as JSON when it is not
+/// UTF-8.
+pub(crate) struct Param(pub String);
 
-impl<S: Send + Sync> FromRequestParts<S> for PagePath {
-    type Rejection = Refusal;
+impl<S: Send + Sync> FromRequestParts<S> for Param {
+    type Rejection = Unreadable;
 
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Refusal> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Unreadable> {
         axum::extract::Path::<String>::from_request_parts(parts, state)
             .await
             .map(|axum::extract::Path(path)| Self(path))
-            .map_err(|rejection| Refusal::Unreadable(rejection.status(), rejection.body_text()))
+            .map_err(|rejection| Unreadable(rejection.status(), rejection.body_text()))
     }
 }
 
@@ -297,7 +286,7 @@ struct Made {
 async fn write(
     State(editor): State<Arc<Editor>>,
     Extension(Machine(machine)): Extension<Machine>,
-    PagePath(path): PagePath,
+    Param(path): Param,
     Body(body): Body<Writing>,
 ) -> Result<Response, Refusal> {
     let size = u64::try_from(body.markdown.len()).unwrap_or(u64::MAX);
@@ -334,7 +323,7 @@ async fn write(
 async fn remove(
     State(editor): State<Arc<Editor>>,
     Extension(Machine(machine)): Extension<Machine>,
-    PagePath(path): PagePath,
+    Param(path): Param,
     Body(body): Body<Removal>,
 ) -> Result<Json<Deleted>, Refusal> {
     check_page(&path, 0)?;

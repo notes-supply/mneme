@@ -15,7 +15,9 @@ The tokens file maps each machine's name to the SHA-256 of its token, and each m
 { "laptop": "9f86d081…", "mirror": { "sha256": "2c26b46b…", "access": "read" } }
 ```
 
-A read-only token may clone, fetch and report its machine's state, and a push with it is refused with a reason Git shows. `access` is `write` when it is left out, as for a plain hash, and any other key or value is refused at start. `--tokens-env NAME` takes the same JSON from an environment variable instead of a file, as a container platform gives a secret. The server creates the repository when it is missing and installs its push check, which refuses what breaks the wiki's rules: a symlink, a submodule, a path named `.git`, a page over 1 MiB, a file over 100 MiB, or a deletion of `main`. Machines sync over `/git/wiki.git` with their tokens and report their state, which `/v1/machines` lists.
+A read-only token may clone, fetch and report its machine's state, and a push with it is refused with a reason Git shows. `access` is `write` when it is left out, as for a plain hash, and any other key or value but `admin` is refused at start.
+
+`"access": "admin"` gives a token that may do all a `write` token may, and also [add and remove machines](api.md#managing-machines) while the server runs, through `/v1/tokens`, with no restart and no change to the tokens file. Only the tokens file gives admin. A machine added that way is `read` or `write`, is given by the SHA-256 of its token, so the server never sees the token, and may not take a name the tokens file has. The server keeps those machines in `mneme/tokens.json` inside the bare repository, on the same volume as the history and `mneme/machines.json`, so they survive a restart and a new release. `--tokens-env NAME` takes the same JSON from an environment variable instead of a file, as a container platform gives a secret. The server creates the repository when it is missing and installs its push check, which refuses what breaks the wiki's rules: a symlink, a submodule, a path named `.git`, a page over 1 MiB, a file over 100 MiB, or a deletion of `main`. Machines sync over `/git/wiki.git` with their tokens and report their state, which `/v1/machines` lists.
 
 The wiki may hold files that are not pages, such as images, PDFs and zips, up to 100 MiB each, which is also the largest file GitHub takes. Git keeps every version of every file, and a file that does not compress costs its size again for each version, whether or not it is deleted later. Give the repository's volume room for all of them, as much again for a repack, which writes the new pack before it removes the old, and 1 GiB for the largest push, which Git writes to the volume before the push check reads it. The server's memory does not grow with the files: 256 MiB is enough for a file of the largest size ([decisions.md](decisions.md#files) has the measurements).
 
@@ -25,7 +27,7 @@ By default `/v1`, the [reading API](api.md), has no login: whoever reaches it re
 
 A client that is not a folder of files, such as a web editor or an agent, changes pages through the server's [editing routes](api.md#editing) with a token that may write, with or without `--private-api`. Each change is one commit on `main`, made on top of whatever has been pushed, keeps the push check's rules, and is refused when the page itself has changed since the client read it.
 
-With `--private-api`, every `/v1` route asks for `Authorization: Bearer <token>` with a token from the tokens file, read-only or not, and answers `401` with no body without one, as `/git/` does. `/healthz` stays open for probes. A server reachable from the internet should run with it.
+With `--private-api`, every `/v1` route asks for `Authorization: Bearer <token>` with a token the server knows, of any access, and answers `401` with no body without one, as `/git/` does. `/healthz` stays open for probes. A server reachable from the internet should run with it.
 
 ## The image
 
@@ -52,7 +54,7 @@ spec:
         subject: ^https://github\.com/notes-supply/mneme/\.github/workflows/release\.yml@refs/heads/main$
 ```
 
-`deploy/` is a Kustomize base that holds only what a release may change: the Deployment. The cluster's own repository adds its specifics as an overlay, and owns the Service, the ingress, the network policy, the tokens Secret `mneme-tokens` and the volume claim `mneme-repository`, which the Deployment mounts by name. The project's own cluster does exactly that. Mneme reads the tokens file at start, so whatever changes the Secret should restart it.
+`deploy/` is a Kustomize base that holds only what a release may change: the Deployment. The cluster's own repository adds its specifics as an overlay, and owns the Service, the ingress, the network policy, the tokens Secret `mneme-tokens` and the volume claim `mneme-repository`, which the Deployment mounts by name. The project's own cluster does exactly that. Mneme reads the tokens file at start, so whatever changes the Secret should restart it. Machines added through the API need no restart.
 
 The Deployment asks for little, so that a locked-down namespace takes it, and a release should keep it so: it runs as the `default` service account with no token mounted, mounts no inline CSI volume, reads no Secret but `mneme-tokens`, and names no pull secret, since the image is public. A pod the cluster refuses is never created, so that release never gets ready, which leaves Mneme down until a revert.
 

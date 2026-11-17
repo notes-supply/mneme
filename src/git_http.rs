@@ -22,7 +22,7 @@ use tokio::process::{ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, timeout};
 
-use crate::auth::{Access, Machine, Tokens, unauthorized};
+use crate::auth::{Machine, Tokens, unauthorized};
 use crate::machines::{MAX_REPORT, REPORT_HEADER, Report, Unreadable};
 use crate::serve::Wiki;
 use crate::{hook, log, now, rules};
@@ -127,11 +127,7 @@ fn service(path_info: &str, query: Option<&str>) -> Option<&'static str> {
 /// A report the request carries is stored, and the request is not counted as the machine's
 /// last sync. A report that cannot be stored fails the request, so its service sends it again.
 async fn backend(State(git): State<Git>, request: Request) -> Response {
-    let Some((machine, access)) = git
-        .tokens
-        .machine(request.headers().get(AUTHORIZATION))
-        .map(|(machine, access)| (machine.to_owned(), access))
-    else {
+    let Some((machine, access)) = git.tokens.machine(request.headers().get(AUTHORIZATION)) else {
         return unauthorized();
     };
     let path_info = request
@@ -139,7 +135,7 @@ async fn backend(State(git): State<Git>, request: Request) -> Response {
         .path()
         .strip_prefix(PREFIX)
         .unwrap_or_default();
-    if access == Access::Read && service(path_info, request.uri().query()) == Some(RECEIVE) {
+    if !access.may_write() && service(path_info, request.uri().query()) == Some(RECEIVE) {
         let reason =
             format!("mneme: {machine} has a read-only token, which may fetch but not push\n");
         let mut response = (

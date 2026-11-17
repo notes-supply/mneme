@@ -26,7 +26,7 @@ use crate::git_version;
 use crate::index::{Index, Status};
 use crate::machines::Machines;
 use crate::repo::{NotOnMain, Repo};
-use crate::{edit, git_http, raw, rules};
+use crate::{admin, edit, git_http, raw, rules};
 use crate::{log, now};
 
 /// The longest a change to the machines' state waits before it is written.
@@ -54,7 +54,7 @@ pub struct Args {
     #[arg(long, required_unless_present = "folder", requires = "tokens_from")]
     pub repo: Option<PathBuf>,
     /// A JSON file that maps each machine's name to the SHA-256 of its token, or to an object
-    /// with that hash as `sha256` and `access` set to `read` or `write`.
+    /// with that hash as `sha256` and `access` set to `read`, `write` or `admin`.
     #[arg(long, requires = "repo")]
     pub tokens: Option<PathBuf>,
     /// The same JSON as --tokens, from this environment variable instead of a file, as a
@@ -196,8 +196,8 @@ async fn serve_repo(path: PathBuf, args: &Args) -> Result<()> {
         (None, Some(name)) => Tokens::from_env(name)?,
         _ => bail!("mneme serve --repo takes one of --tokens and --tokens-env"),
     };
-    let tokens = Arc::new(tokens);
-    let names: Vec<String> = tokens.names().map(str::to_owned).collect();
+    let tokens = Arc::new(tokens.with_added(path.join("mneme").join("tokens.json"))?);
+    let names = tokens.names();
     let wiki = tokio::task::spawn_blocking(move || -> Result<Wiki> {
         git_http::prepare(&path)?;
         let machines = Machines::load(
@@ -232,6 +232,7 @@ async fn serve_repo(path: PathBuf, args: &Args) -> Result<()> {
         .route("/healthz", get(|| async { "ok" }))
         .merge(reading)
         .merge(edit::router(Arc::clone(&wiki), Arc::clone(&tokens)))
+        .merge(admin::router(Arc::clone(&wiki), Arc::clone(&tokens)))
         .merge(git_http::router(wiki, tokens))
         .layer(middleware::from_fn(request_log));
     listen(args.addr.unwrap_or(REPO_ADDR), router, stopping).await?;

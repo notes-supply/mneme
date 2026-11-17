@@ -27,7 +27,10 @@ pub const MACHINES: [(&str, &str); 3] = [
 ];
 /// A machine whose token may only read, which a server started with [`Options::reader`] knows.
 pub const READER: (&str, &str) = ("mirror", "test-token-of-mirror");
-/// The variable a server started with [`Options::tokens_env`] reads its tokens from.
+/// A machine whose token may manage machines, which a server started with [`Options::admin`]
+/// knows.
+pub const ADMIN: (&str, &str) = ("keeper", "test-token-of-keeper");
+/// The variable a server started with [`TokensFrom::Env`] reads its tokens from.
 const TOKENS_ENV: &str = "MNEME_TEST_TOKENS";
 
 /// How a test server starts, beyond the defaults.
@@ -35,12 +38,24 @@ const TOKENS_ENV: &str = "MNEME_TEST_TOKENS";
 pub struct Options {
     /// Also know [`READER`], with a read-only token.
     pub reader: bool,
-    /// Take the tokens from an environment variable instead of a file.
-    pub tokens_env: bool,
+    /// Also know [`ADMIN`], with an admin token.
+    pub admin: bool,
+    /// Where the server reads the tokens from.
+    pub tokens_from: TokensFrom,
     /// `--private-api`: every `/v1` route asks for a token.
     pub private_api: bool,
     /// A folder to put first on the server's `PATH`, such as one with a `git` of a test's own.
     pub path: Option<PathBuf>,
+}
+
+/// Where a test server reads its tokens from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TokensFrom {
+    /// `--tokens FILE`.
+    #[default]
+    File,
+    /// `--tokens-env NAME`.
+    Env,
 }
 
 pub struct Server {
@@ -168,11 +183,16 @@ impl Server {
             let entry = serde_json::json!({ "sha256": mneme_hash(token), "access": "read" });
             hashes.insert(machine.to_owned(), entry);
         }
+        if options.admin {
+            let (machine, token) = ADMIN;
+            let entry = serde_json::json!({ "sha256": mneme_hash(token), "access": "admin" });
+            hashes.insert(machine.to_owned(), entry);
+        }
         let tokens = Value::Object(hashes).to_string();
         let mut command = Command::new(env!("CARGO_BIN_EXE_mneme"));
         command.args(["serve", "--addr", "127.0.0.1:0"]);
         git.apply(&mut command);
-        if options.tokens_env {
+        if options.tokens_from == TokensFrom::Env {
             command
                 .args(["--tokens-env", TOKENS_ENV])
                 .env(TOKENS_ENV, tokens);

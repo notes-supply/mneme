@@ -1,10 +1,11 @@
-//! What the server knows of each machine in the tokens file: when it last made an authenticated
+//! What the server knows of each machine it has a token for: when it last made an authenticated
 //! Git request, and what its autosave service last reported. It is kept in a JSON file beside the
 //! repository's own files, outside its refs and objects, so it survives a restart.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
@@ -182,7 +183,7 @@ struct State {
     changed: bool,
 }
 
-/// Every machine in the tokens file, by name.
+/// Every machine the server has a token for, by name.
 pub struct Machines {
     state: Mutex<State>,
     /// The state file, or `None` when there are no machines to keep.
@@ -230,6 +231,21 @@ impl Machines {
                 changed: false,
             }),
             file: None,
+        }
+    }
+
+    /// Starts keeping `name`, a machine added while the server runs. One it keeps already stays
+    /// as it is.
+    pub fn admit(&self, name: &str) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.records.entry(name.to_owned()).or_default();
+    }
+
+    /// Stops keeping `name`, a machine removed while the server runs, and drops what it knew.
+    pub fn forget(&self, name: &str) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.records.remove(name).is_some() {
+            state.changed = true;
         }
     }
 
@@ -327,13 +343,27 @@ fn read(file: &Path) -> Result<BTreeMap<String, Record>> {
     serde_json::from_slice(&text).with_context(|| format!("reading {}", file.display()))
 }
 
-fn write(file: &Path, json: &[u8]) -> Result<()> {
-    let folder = file.parent().context("the state file has no folder")?;
+/// Writes `json` to `file` through a temporary file and a rename, so that a crash leaves the old
+/// file or the new one, and syncs the folder, so that a write it answers survives a crash. Only
+/// the server's user may read it. A failed sync of the folder is an error, though the rename may
+/// have happened.
+pub(crate) fn write(file: &Path, json: &[u8]) -> Result<()> {
+    let folder = file
+        .parent()
+        .with_context(|| format!("{} has no folder", file.display()))?;
     fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
     let temporary = file.with_extension("json.tmp");
-    let mut out =
-        File::create(&temporary).with_context(|| format!("creating {}", temporary.display()))?;
+    let mut out = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temporary)
+        .with_context(|| format!("creating {}", temporary.display()))?;
     out.write_all(json)?;
     out.sync_all()?;
-    fs::rename(&temporary, file).with_context(|| format!("writing {}", file.display()))
+    fs::rename(&temporary, file).with_context(|| format!("writing {}", file.display()))?;
+    File::open(folder)
+        .and_then(|folder| folder.sync_all())
+        .with_context(|| format!("syncing {}", folder.display()))
 }
