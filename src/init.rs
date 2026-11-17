@@ -64,7 +64,10 @@ pub fn run(args: &Args) -> Result<()> {
     let unit = match &systemctl {
         Some(systemctl) if !args.no_service => {
             let units = config_home(&home).join("systemd/user");
-            let path = units.join(unit_name(&home, &folder));
+            // Named by where the folder really is, so that a link to a folder another unit
+            // keeps finds that unit rather than starting a second service on it.
+            let real = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+            let path = units.join(unit_name(&real(&home), &real(&folder)));
             let text = unit(&command, &folder, &remote, args.follow)?;
             if !args.force && fs::read_to_string(&path).is_ok_and(|installed| installed != text) {
                 bail!(
@@ -121,7 +124,11 @@ pub fn run(args: &Args) -> Result<()> {
         return Ok(());
     };
     let replaced = install(&path, &text)?;
-    let unit = unit_name(&home, &folder);
+    let unit = path
+        .file_name()
+        .context("the unit has no file name")?
+        .to_string_lossy()
+        .into_owned();
     if let Some(legacy) = moved {
         systemctl_user(systemctl, &["disable", "--now", UNIT])?;
         fs::remove_file(&legacy).with_context(|| format!("removing {}", legacy.display()))?;

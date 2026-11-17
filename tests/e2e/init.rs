@@ -416,6 +416,24 @@ fn a_folder_whose_service_had_the_old_name_moves_to_its_own_and_stops_the_old_on
     assert!(!legacy.exists() && fs::read_to_string(&named).unwrap().contains("--follow"));
     machine.systemctl();
 
+    // A link to the folder finds its unit instead of starting a second service on it.
+    let link = home.join("team-link");
+    std::os::unix::fs::symlink(&folder, &link).unwrap();
+    let linked = machine.init(&[
+        "--folder",
+        link.to_str().unwrap(),
+        "--remote",
+        bare.to_str().unwrap(),
+        "--name",
+        "laptop",
+    ]);
+    assert!(!linked.status.success(), "{linked:?}");
+    assert!(
+        stderr(&linked).contains(named.to_str().unwrap()),
+        "{linked:?}"
+    );
+    assert_eq!(machine.systemctl(), "");
+
     // Another folder's old unit is left as it is.
     let other = bare_wiki(&machine.git, home);
     fs::write(
