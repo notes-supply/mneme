@@ -77,6 +77,17 @@ pub fn run(args: &Args) -> Result<()> {
             // service as `UNIT`, which the new unit replaces rather than runs beside.
             let legacy = units.join(UNIT);
             let moved = (path != legacy && same_folder(&legacy, &text)).then_some(legacy);
+            if let Some(legacy) = &moved
+                && !args.force
+                && fs::read_to_string(legacy).is_ok_and(|installed| installed != text)
+            {
+                bail!(
+                    "{} runs this folder and differs from the unit mneme init would write. \
+                     Pass --force to replace it with {}",
+                    legacy.display(),
+                    path.display()
+                );
+            }
             Some((systemctl, path, text, moved))
         }
         _ => None,

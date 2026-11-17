@@ -403,6 +403,19 @@ fn a_folder_whose_service_had_the_old_name_moves_to_its_own_and_stops_the_old_on
          --user enable --now mneme-autosave-team.service\n"
     );
 
+    // One that runs the folder differently is moved only with --force, as any differing unit.
+    fs::rename(&named, &legacy).unwrap();
+    let following = [&args[..], &["--follow"]].concat();
+    let refused = machine.init(&following);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(stderr(&refused).contains("--force"), "{refused:?}");
+    assert!(legacy.exists() && !named.exists(), "nothing moved");
+    assert_eq!(machine.systemctl(), "");
+    let forced = machine.init(&[&following[..], &["--force"]].concat());
+    assert!(forced.status.success(), "{forced:?}");
+    assert!(!legacy.exists() && fs::read_to_string(&named).unwrap().contains("--follow"));
+    machine.systemctl();
+
     // Another folder's old unit is left as it is.
     let other = bare_wiki(&machine.git, home);
     fs::write(
