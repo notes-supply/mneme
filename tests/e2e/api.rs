@@ -596,7 +596,7 @@ fn every_route_of_files_answers_in_the_shape_of_its_example_file() {
 
 /// Checks `actual` against the example `name` both ways, after writing it there when
 /// `MNEME_WRITE_EXAMPLES` is set.
-fn fits_example(name: &str, actual: &Value) {
+pub fn fits_example(name: &str, actual: &Value) {
     if std::env::var_os("MNEME_WRITE_EXAMPLES").is_some() {
         let pretty = serde_json::to_string_pretty(actual).unwrap();
         fs::write(examples().join(format!("{name}.json")), pretty + "\n").unwrap();

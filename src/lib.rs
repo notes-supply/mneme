@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
+pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod autosave;
