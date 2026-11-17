@@ -373,6 +373,56 @@ fn each_folder_gets_a_service_of_its_own_and_the_default_one_keeps_its_name() {
 }
 
 #[test]
+fn a_folder_whose_service_had_the_old_name_moves_to_its_own_and_stops_the_old_one() {
+    let machine = Machine::new();
+    let home = machine.git.home();
+    let bare = bare_wiki(&machine.git, machine.root());
+    let folder = home.join("team");
+    let args = [
+        "--folder",
+        folder.to_str().unwrap(),
+        "--remote",
+        bare.to_str().unwrap(),
+        "--name",
+        "laptop",
+    ];
+    // What a version that gave every folder `mneme-autosave.service` left behind.
+    assert!(machine.init(&args).status.success());
+    let named = machine.units().join("mneme-autosave-team.service");
+    let legacy = machine.units().join("mneme-autosave.service");
+    fs::rename(&named, &legacy).unwrap();
+    machine.systemctl();
+
+    let output = machine.init(&args);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!legacy.exists(), "the old unit is gone");
+    assert!(named.exists());
+    assert_eq!(
+        machine.systemctl(),
+        "--user disable --now mneme-autosave.service\n--user daemon-reload\n\
+         --user enable --now mneme-autosave-team.service\n"
+    );
+
+    // Another folder's old unit is left as it is.
+    let other = bare_wiki(&machine.git, home);
+    fs::write(
+        &legacy,
+        "[Unit]\nDescription=Mneme autosave for /elsewhere\n",
+    )
+    .unwrap();
+    let mine = home.join("mine");
+    let output = machine.init(&[
+        "--folder",
+        mine.to_str().unwrap(),
+        "--remote",
+        other.to_str().unwrap(),
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(legacy.exists(), "a unit for another folder stays");
+    assert!(!machine.systemctl().contains("disable"));
+}
+
+#[test]
 fn init_puts_the_wiki_in_home_and_names_the_machine_after_the_host() {
     let machine = Machine::new();
     let bare = bare_wiki(&machine.git, machine.root());
