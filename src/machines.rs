@@ -3,7 +3,7 @@
 //! repository's own files, outside its refs and objects, so it survives a restart.
 
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
@@ -344,7 +344,9 @@ fn read(file: &Path) -> Result<BTreeMap<String, Record>> {
 }
 
 /// Writes `json` to `file` through a temporary file and a rename, so that a crash leaves the old
-/// file or the new one. Only the server's user may read it.
+/// file or the new one, and syncs the folder, so that a write it answers survives a crash. Only
+/// the server's user may read it. A failed sync of the folder is an error, though the rename may
+/// have happened.
 pub(crate) fn write(file: &Path, json: &[u8]) -> Result<()> {
     let folder = file
         .parent()
@@ -360,5 +362,8 @@ pub(crate) fn write(file: &Path, json: &[u8]) -> Result<()> {
         .with_context(|| format!("creating {}", temporary.display()))?;
     out.write_all(json)?;
     out.sync_all()?;
-    fs::rename(&temporary, file).with_context(|| format!("writing {}", file.display()))
+    fs::rename(&temporary, file).with_context(|| format!("writing {}", file.display()))?;
+    File::open(folder)
+        .and_then(|folder| folder.sync_all())
+        .with_context(|| format!("syncing {}", folder.display()))
 }

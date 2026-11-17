@@ -23,6 +23,9 @@ use crate::{log, now};
 struct Admin {
     wiki: Arc<Wiki>,
     tokens: Arc<Tokens>,
+    /// Held across a change to the tokens and the bookkeeping that follows it, so that two
+    /// changes to one machine can't end with its token added and its record forgotten.
+    serial: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// The routes under `/v1/tokens`. They ask for an admin token whether or not the reading API
@@ -31,6 +34,7 @@ pub fn router(wiki: Arc<Wiki>, tokens: Arc<Tokens>) -> Router {
     let admin = Admin {
         wiki,
         tokens: Arc::clone(&tokens),
+        serial: Arc::default(),
     };
     Router::new()
         .route("/v1/tokens", get(list))
@@ -70,6 +74,7 @@ async fn add(
     Param(name): Param,
     Body(adding): Body<Adding>,
 ) -> Response {
+    let _one = admin.serial.lock().await;
     let tokens = Arc::clone(&admin.tokens);
     let asked = name.clone();
     let added = tokio::task::spawn_blocking(move || {
@@ -99,6 +104,7 @@ async fn remove(
     Extension(Machine(by)): Extension<Machine>,
     Param(name): Param,
 ) -> Response {
+    let _one = admin.serial.lock().await;
     let tokens = Arc::clone(&admin.tokens);
     let asked = name.clone();
     let removed = tokio::task::spawn_blocking(move || tokens.remove(&asked)).await;
