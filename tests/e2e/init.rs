@@ -434,6 +434,31 @@ fn a_folder_whose_service_had_the_old_name_moves_to_its_own_and_stops_the_old_on
     );
     assert_eq!(machine.systemctl(), "");
 
+    // A folder yet to be made under a link is named by where it will really be, before and
+    // after init makes it.
+    let storage = home.join("storage");
+    fs::create_dir_all(&storage).unwrap();
+    std::os::unix::fs::symlink(&storage, home.join("shelf")).unwrap();
+    let fresh = home.join("shelf/notes");
+    let fresh_args = [
+        "--folder",
+        fresh.to_str().unwrap(),
+        "--remote",
+        bare.to_str().unwrap(),
+        "--name",
+        "laptop",
+    ];
+    for _ in 0..2 {
+        let output = machine.init(&fresh_args);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            machine
+                .systemctl()
+                .contains("enable --now mneme-autosave-storage-notes.service"),
+            "{output:?}"
+        );
+    }
+
     // Another folder's old unit is left as it is.
     let other = bare_wiki(&machine.git, home);
     fs::write(

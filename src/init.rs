@@ -66,7 +66,6 @@ pub fn run(args: &Args) -> Result<()> {
             let units = config_home(&home).join("systemd/user");
             // Named by where the folder really is, so that a link to a folder another unit
             // keeps finds that unit rather than starting a second service on it.
-            let real = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
             let path = units.join(unit_name(&real(&home), &real(&folder)));
             let text = unit(&command, &folder, &remote, args.follow)?;
             if !args.force && fs::read_to_string(&path).is_ok_and(|installed| installed != text) {
@@ -181,6 +180,28 @@ fn unit_name(home: &Path, folder: &Path) -> String {
     let hash = crate::hex(&Sha256::digest(name.as_bytes()));
     let start = name[..LONGEST_NAME - 9].trim_end_matches('-');
     format!("mneme-autosave-{start}-{}.service", &hash[..8])
+}
+
+/// Where `path` really is: its links resolved, and for a folder `mneme init` has yet to make,
+/// those of its nearest folder that is there, so that making it doesn't change its unit's name.
+fn real(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(found) = fs::canonicalize(at) {
+            return missing
+                .iter()
+                .rev()
+                .fold(found, |real, part| real.join(part));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_owned());
+                at = parent;
+            }
+            _ => return path.to_owned(),
+        }
+    }
 }
 
 /// The longest NAME in `mneme-autosave-NAME.service`.
