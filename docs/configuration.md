@@ -7,7 +7,8 @@ Every machine that writes the wiki runs the autosave service on its own folder, 
 `mneme init` makes the folder ready, installs the service as a systemd user unit, and starts it. Run it once on each machine. With `--no-service`, or without `systemctl` on `PATH`, it prints the command that runs the service instead; pass `--no-service` where `systemctl --user` finds no user manager, as over SSH.
 
 - A missing or empty folder gets a clone. A folder of notes that is not a Git repository becomes the wiki when the remote is empty, and the first save pushes the notes.
-- The unit runs `mneme autosave run` with absolute paths, and its logs are in `journalctl --user -u mneme-autosave`.
+- Each folder has a unit of its own, so one machine can keep several wikis: `mneme-autosave.service` for `~/wiki`, and `mneme-autosave-NAME.service` for another folder, NAME being its path under the home folder (`~/team/notes` is `mneme-autosave-team-notes`) or, outside it, its own name. `mneme init` prints the unit's name.
+- The unit runs `mneme autosave run` with absolute paths, and its logs are in `journalctl --user -u` and the unit's name, such as `mneme-autosave`.
 - Running it again with the same options leaves the unit as it is. A different unit is refused unless `--force`.
 
 | Option | |

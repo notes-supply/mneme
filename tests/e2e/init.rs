@@ -57,11 +57,23 @@ impl Machine {
             .unwrap()
     }
 
-    /// Where the unit goes under the `XDG_CONFIG_HOME` that [`Isolation`] gives every command.
+    /// The folder of units under the `XDG_CONFIG_HOME` that [`Isolation`] gives every command.
+    fn units(&self) -> PathBuf {
+        self.git.home().join("xdg/systemd/user")
+    }
+
+    /// Where the one unit a test installs is, or the default folder's when there is none.
     fn unit_path(&self) -> PathBuf {
-        self.git
-            .home()
-            .join("xdg/systemd/user/mneme-autosave.service")
+        fs::read_dir(self.units())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "service")
+            })
+            .unwrap_or_else(|| self.units().join("mneme-autosave.service"))
     }
 
     fn unit(&self) -> String {
@@ -106,10 +118,10 @@ fn init_clones_writes_the_unit_with_absolute_paths_and_starts_the_service() {
     assert_eq!(stderr(&output), "", "a person reads no log lines");
     assert_eq!(
         machine.systemctl(),
-        "--user daemon-reload\n--user enable --now mneme-autosave.service\n"
+        "--user daemon-reload\n--user enable --now mneme-autosave-my-wiki.service\n"
     );
     assert!(
-        stdout(&output).contains("journalctl --user -u mneme-autosave"),
+        stdout(&output).contains("journalctl --user -u mneme-autosave-my-wiki\n"),
         "{output:?}"
     );
     let unit = machine.unit();
@@ -141,7 +153,7 @@ fn init_clones_writes_the_unit_with_absolute_paths_and_starts_the_service() {
     assert_eq!(machine.unit(), unit);
     assert_eq!(
         machine.systemctl(),
-        "--user daemon-reload\n--user enable --now mneme-autosave.service\n"
+        "--user daemon-reload\n--user enable --now mneme-autosave-my-wiki.service\n"
     );
 
     let renamed = [
@@ -162,8 +174,8 @@ fn init_clones_writes_the_unit_with_absolute_paths_and_starts_the_service() {
     assert!(machine.unit().contains("--name desktop\n"));
     assert_eq!(
         machine.systemctl(),
-        "--user daemon-reload\n--user enable --now mneme-autosave.service\n\
-         --user try-restart mneme-autosave.service\n",
+        "--user daemon-reload\n--user enable --now mneme-autosave-my-wiki.service\n\
+         --user try-restart mneme-autosave-my-wiki.service\n",
         "a replaced unit restarts a service that runs the old one"
     );
 }
@@ -316,6 +328,154 @@ fn init_takes_a_folder_of_files_when_the_remote_has_no_main_and_refuses_otherwis
         fs::read_to_string(other.join("mine.md")).unwrap(),
         "# Mine\n"
     );
+}
+
+#[test]
+fn each_folder_gets_a_service_of_its_own_and_the_default_one_keeps_its_name() {
+    let machine = Machine::new();
+    let home = machine.git.home();
+    for (folder, unit) in [
+        ("wiki", "mneme-autosave.service"),
+        (
+            "shebang/intranet",
+            "mneme-autosave-shebang-intranet.service",
+        ),
+    ] {
+        let place = machine.root().join(unit);
+        fs::create_dir_all(&place).unwrap();
+        let bare = bare_wiki(&machine.git, &place);
+        let folder = home.join(folder);
+        let output = machine.init(&[
+            "--folder",
+            folder.to_str().unwrap(),
+            "--remote",
+            bare.to_str().unwrap(),
+            "--name",
+            "laptop",
+        ]);
+        assert!(output.status.success(), "{output:?}");
+        assert!(folder.join("notes.md").exists(), "{output:?}");
+        assert_eq!(
+            machine.systemctl(),
+            format!("--user daemon-reload\n--user enable --now {unit}\n")
+        );
+        let written = fs::read_to_string(machine.units().join(unit)).unwrap();
+        assert!(
+            written.contains(&format!("--folder {} ", folder.display())),
+            "{written}"
+        );
+    }
+    assert_eq!(
+        fs::read_dir(machine.units()).unwrap().count(),
+        2,
+        "the second folder left the first one's unit alone"
+    );
+}
+
+#[test]
+fn a_folder_whose_service_had_the_old_name_moves_to_its_own_and_stops_the_old_one() {
+    let machine = Machine::new();
+    let home = machine.git.home();
+    let bare = bare_wiki(&machine.git, machine.root());
+    let folder = home.join("team");
+    let args = [
+        "--folder",
+        folder.to_str().unwrap(),
+        "--remote",
+        bare.to_str().unwrap(),
+        "--name",
+        "laptop",
+    ];
+    // What a version that gave every folder `mneme-autosave.service` left behind.
+    assert!(machine.init(&args).status.success());
+    let named = machine.units().join("mneme-autosave-team.service");
+    let legacy = machine.units().join("mneme-autosave.service");
+    fs::rename(&named, &legacy).unwrap();
+    machine.systemctl();
+
+    let output = machine.init(&args);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!legacy.exists(), "the old unit is gone");
+    assert!(named.exists());
+    assert_eq!(
+        machine.systemctl(),
+        "--user disable --now mneme-autosave.service\n--user daemon-reload\n\
+         --user enable --now mneme-autosave-team.service\n"
+    );
+
+    // One that runs the folder differently is moved only with --force, as any differing unit.
+    fs::rename(&named, &legacy).unwrap();
+    let following = [&args[..], &["--follow"]].concat();
+    let refused = machine.init(&following);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(stderr(&refused).contains("--force"), "{refused:?}");
+    assert!(legacy.exists() && !named.exists(), "nothing moved");
+    assert_eq!(machine.systemctl(), "");
+    let forced = machine.init(&[&following[..], &["--force"]].concat());
+    assert!(forced.status.success(), "{forced:?}");
+    assert!(!legacy.exists() && fs::read_to_string(&named).unwrap().contains("--follow"));
+    machine.systemctl();
+
+    // A link to the folder finds its unit instead of starting a second service on it.
+    let link = home.join("team-link");
+    std::os::unix::fs::symlink(&folder, &link).unwrap();
+    let linked = machine.init(&[
+        "--folder",
+        link.to_str().unwrap(),
+        "--remote",
+        bare.to_str().unwrap(),
+        "--name",
+        "laptop",
+    ]);
+    assert!(!linked.status.success(), "{linked:?}");
+    assert!(
+        stderr(&linked).contains(named.to_str().unwrap()),
+        "{linked:?}"
+    );
+    assert_eq!(machine.systemctl(), "");
+
+    // A folder yet to be made under a link is named by where it will really be, before and
+    // after init makes it.
+    let storage = home.join("storage");
+    fs::create_dir_all(&storage).unwrap();
+    std::os::unix::fs::symlink(&storage, home.join("shelf")).unwrap();
+    let fresh = home.join("shelf/notes");
+    let fresh_args = [
+        "--folder",
+        fresh.to_str().unwrap(),
+        "--remote",
+        bare.to_str().unwrap(),
+        "--name",
+        "laptop",
+    ];
+    for _ in 0..2 {
+        let output = machine.init(&fresh_args);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            machine
+                .systemctl()
+                .contains("enable --now mneme-autosave-storage-notes.service"),
+            "{output:?}"
+        );
+    }
+
+    // Another folder's old unit is left as it is.
+    let other = bare_wiki(&machine.git, home);
+    fs::write(
+        &legacy,
+        "[Unit]\nDescription=Mneme autosave for /elsewhere\n",
+    )
+    .unwrap();
+    let mine = home.join("mine");
+    let output = machine.init(&[
+        "--folder",
+        mine.to_str().unwrap(),
+        "--remote",
+        other.to_str().unwrap(),
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(legacy.exists(), "a unit for another folder stays");
+    assert!(!machine.systemctl().contains("disable"));
 }
 
 #[test]

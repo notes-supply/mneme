@@ -11,10 +11,11 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest as _, Sha256};
 
 use crate::autosave::{self, Ready, Remote, RemoteArgs, Settings};
 
-/// The unit's name, and its file's.
+/// The unit of the wiki in `~/wiki`, the folder `mneme init` takes by default.
 const UNIT: &str = "mneme-autosave.service";
 /// The unit as a template. Each `@NAME@` is filled in.
 const TEMPLATE: &str = include_str!("mneme-autosave.service");
@@ -62,7 +63,10 @@ pub fn run(args: &Args) -> Result<()> {
     let systemctl = on_path("systemctl");
     let unit = match &systemctl {
         Some(systemctl) if !args.no_service => {
-            let path = config_home(&home).join("systemd/user").join(UNIT);
+            let units = config_home(&home).join("systemd/user");
+            // Named by where the folder really is, so that a link to a folder another unit
+            // keeps finds that unit rather than starting a second service on it.
+            let path = units.join(unit_name(&real(&home), &real(&folder)));
             let text = unit(&command, &folder, &remote, args.follow)?;
             if !args.force && fs::read_to_string(&path).is_ok_and(|installed| installed != text) {
                 bail!(
@@ -71,7 +75,22 @@ pub fn run(args: &Args) -> Result<()> {
                     path.display()
                 );
             }
-            Some((systemctl, path, text))
+            // A machine set up before each folder had a unit of its own has this folder's
+            // service as `UNIT`, which the new unit replaces rather than runs beside.
+            let legacy = units.join(UNIT);
+            let moved = (path != legacy && same_folder(&legacy, &text)).then_some(legacy);
+            if let Some(legacy) = &moved
+                && !args.force
+                && fs::read_to_string(legacy).is_ok_and(|installed| installed != text)
+            {
+                bail!(
+                    "{} runs this folder and differs from the unit mneme init would write. \
+                     Pass --force to replace it with {}",
+                    legacy.display(),
+                    path.display()
+                );
+            }
+            Some((systemctl, path, text, moved))
         }
         _ => None,
     };
@@ -95,7 +114,7 @@ pub fn run(args: &Args) -> Result<()> {
             folder.display()
         ),
     }
-    let Some((systemctl, path, text)) = unit else {
+    let Some((systemctl, path, text, moved)) = unit else {
         if systemctl.is_none() {
             println!("systemctl is not on PATH, so no service is installed.");
         }
@@ -104,16 +123,100 @@ pub fn run(args: &Args) -> Result<()> {
         return Ok(());
     };
     let replaced = install(&path, &text)?;
+    let unit = path
+        .file_name()
+        .context("the unit has no file name")?
+        .to_string_lossy()
+        .into_owned();
+    if let Some(legacy) = moved {
+        systemctl_user(systemctl, &["disable", "--now", UNIT])?;
+        fs::remove_file(&legacy).with_context(|| format!("removing {}", legacy.display()))?;
+        println!(
+            "Moved this folder's service from {UNIT} to {unit}, so that other folders can have theirs."
+        );
+    }
     systemctl_user(systemctl, &["daemon-reload"])?;
-    systemctl_user(systemctl, &["enable", "--now", UNIT])?;
+    systemctl_user(systemctl, &["enable", "--now", &unit])?;
     if replaced {
-        systemctl_user(systemctl, &["try-restart", UNIT])?;
+        systemctl_user(systemctl, &["try-restart", &unit])?;
     }
     println!(
-        "Installed {} and started it. Its logs: journalctl --user -u mneme-autosave",
-        path.display()
+        "Installed {} and started it. Its logs: journalctl --user -u {}",
+        path.display(),
+        unit.trim_end_matches(".service")
     );
     Ok(())
+}
+
+/// The unit that keeps `folder`, so that each folder has a service of its own: `UNIT` for
+/// `~/wiki`, which machines set up before had, and otherwise `mneme-autosave-NAME.service`,
+/// NAME being the folder's path under the home folder, or its own name outside it, in
+/// lower-case letters, digits and single hyphens. Two folders whose names come out the same
+/// write different units, so the second is refused without `--force`.
+fn unit_name(home: &Path, folder: &Path) -> String {
+    if folder == home.join("wiki") {
+        return UNIT.to_owned();
+    }
+    let named = folder
+        .strip_prefix(home)
+        .ok()
+        .filter(|under| !under.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new(folder.file_name().unwrap_or(folder.as_os_str())));
+    let mut name = String::new();
+    for c in named.to_string_lossy().chars() {
+        if c.is_ascii_alphanumeric() {
+            name.push(c.to_ascii_lowercase());
+        } else if !name.is_empty() && !name.ends_with('-') {
+            name.push('-');
+        }
+    }
+    let name = name.trim_end_matches('-');
+    let name = if name.is_empty() { "folder" } else { name };
+    // A unit's file name must fit in one path component: a long name keeps its start and a
+    // hash of all of it, so two long names that start alike stay apart.
+    if name.len() <= LONGEST_NAME {
+        return format!("mneme-autosave-{name}.service");
+    }
+    let hash = crate::hex(&Sha256::digest(name.as_bytes()));
+    let start = name[..LONGEST_NAME - 9].trim_end_matches('-');
+    format!("mneme-autosave-{start}-{}.service", &hash[..8])
+}
+
+/// Where `path` really is: its links resolved, and for a folder `mneme init` has yet to make,
+/// those of its nearest folder that is there, so that making it doesn't change its unit's name.
+fn real(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(found) = fs::canonicalize(at) {
+            return missing
+                .iter()
+                .rev()
+                .fold(found, |real, part| real.join(part));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_owned());
+                at = parent;
+            }
+            _ => return path.to_owned(),
+        }
+    }
+}
+
+/// The longest NAME in `mneme-autosave-NAME.service`.
+const LONGEST_NAME: usize = 64;
+
+/// Whether the unit at `path` keeps the same folder as `text`, by their `Description` lines.
+fn same_folder(path: &Path, text: &str) -> bool {
+    let description = |unit: &str| {
+        unit.lines()
+            .find(|line| line.starts_with("Description="))
+            .map(str::to_owned)
+    };
+    fs::read_to_string(path).is_ok_and(|installed| {
+        description(&installed).is_some_and(|line| Some(line) == description(text))
+    })
 }
 
 fn home() -> Result<PathBuf> {
@@ -344,6 +447,36 @@ mod tests {
         assert_eq!(
             shell_word("https://host/~me/wiki.git"),
             "'https://host/~me/wiki.git'"
+        );
+    }
+
+    #[test]
+    fn each_folder_has_a_unit_of_its_own_and_the_default_one_keeps_its_old_name() {
+        let home = Path::new("/home/ada");
+        for (folder, unit) in [
+            ("/home/ada/wiki", "mneme-autosave.service"),
+            (
+                "/home/ada/shebang/wiki",
+                "mneme-autosave-shebang-wiki.service",
+            ),
+            (
+                "/home/ada/Shebang/The Intranet",
+                "mneme-autosave-shebang-the-intranet.service",
+            ),
+            ("/srv/team notes", "mneme-autosave-team-notes.service"),
+            ("/home/ada/.wiki", "mneme-autosave-wiki.service"),
+        ] {
+            assert_eq!(unit_name(home, Path::new(folder)), unit, "{folder}");
+        }
+        let deep = |end: &str| format!("/home/ada/{}/{}/{end}", "a".repeat(120), "b".repeat(120));
+        let one = unit_name(home, Path::new(&deep("one")));
+        let two = unit_name(home, Path::new(&deep("two")));
+        assert!(one.len() <= 100, "{one}");
+        assert_ne!(one, two, "names that start alike stay apart");
+        assert_eq!(
+            one,
+            unit_name(home, Path::new(&deep("one"))),
+            "and stay the same"
         );
     }
 
