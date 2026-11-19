@@ -96,17 +96,26 @@ pub fn image(bytes: &[u8]) -> Option<&'static str> {
 /// Whether the `ftyp` box that `bytes` start with names AVIF, a still image or a sequence, as
 /// its major brand or one of its compatible ones.
 fn is_avif(bytes: &[u8]) -> bool {
-    let size = bytes
-        .get(..4)
-        .and_then(|size| <[u8; 4]>::try_from(size).ok())
-        .map_or(0, u32::from_be_bytes);
+    let number = |at: usize, width: usize| {
+        bytes
+            .get(at..at + width)
+            .map(|be| be.iter().fold(0_u64, |n, &byte| n << 8 | u64::from(byte)))
+    };
+    // A box's size is 32 bits, or, when that is 1, 64 bits after its type; 0 runs to the end.
+    let (brands_at, size) = match number(0, 4) {
+        Some(1) => (16, number(8, 8)),
+        Some(0) => (8, Some(u64::MAX)),
+        size => (8, size),
+    };
+    let Some(size) = size else { return false };
     let end = usize::try_from(size).unwrap_or(usize::MAX).min(bytes.len());
-    // The major brand is at 8, a minor version at 12, and the compatible brands follow.
-    let mut brands = (8..end.saturating_sub(3))
+    // The major brand comes first, then a minor version, then the compatible brands.
+    let minor = brands_at + 4;
+    let mut brands = (brands_at..end.saturating_sub(3))
         .step_by(4)
-        .filter(|&at| at != 12)
+        .filter(|&at| at != minor)
         .filter_map(|at| bytes.get(at..at + 4));
-    end >= 16 && brands.any(|brand| brand == b"avif" || brand == b"avis")
+    end >= minor + 4 && brands.any(|brand| brand == b"avif" || brand == b"avis")
 }
 
 /// The `Content-Disposition` for the file at `path`: whether it shows in place, and its name.
@@ -231,6 +240,12 @@ mod tests {
             (b"RIFF\x24\0\0\0WEBPVP8 ", Some("image/webp")),
             (b"\0\0\0\x14ftypavif\0\0\0\0", Some("image/avif")),
             (b"\0\0\0\x14ftypavis\0\0\0\0", Some("image/avif")),
+            (
+                b"\0\0\0\x01ftyp\0\0\0\0\0\0\0\x1cmif1\0\0\0\0avif",
+                Some("image/avif"),
+            ),
+            (b"\0\0\0\0ftypmif1\0\0\0\0miafavif", Some("image/avif")),
+            (b"\0\0\0\x01ftyp\0\0\0\0\0\0\0\x18avif\0\0", None),
             (&avif, Some("image/avif")),
             (b"\0\0\0\x18ftypmif1\0\0\0\0heic", None),
             (b"\0\0\0\x18ftypisom\0\0\0\0mp41avc1", None),
