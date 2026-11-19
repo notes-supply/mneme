@@ -9,12 +9,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use mneme::autosave::{Autosave, Outcome, Remote, Settings, Token};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::git::Isolation;
 use crate::remote::{Backend, Service, bare_wiki, mneme};
-use crate::server::{AUTHORIZATION, Options, READER, Server};
+use crate::server::{AUTHORIZATION, Options, READER, Server, TOKEN};
 
 const FETCH_EVERY: Duration = Duration::from_secs(30);
 /// The fake clock starts at 2027-01-15T08:00:00Z.
@@ -211,6 +211,34 @@ fn a_follower_takes_the_servers_changes_and_never_saves_or_pushes() {
         "http://127.0.0.1:9/git/wiki.git",
     ]);
     assert!(matches!(mirror.tick(), Outcome::Offline(_)));
+}
+
+#[test]
+fn a_follower_takes_an_image_written_through_the_editing_api() {
+    let mut mirror = Mirror::new();
+    assert_eq!(mirror.tick(), Outcome::Idle);
+    let png = STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+        .unwrap();
+    let body = json!({
+        "base64": STANDARD.encode(&png),
+        "base": null,
+        "author": { "name": "Ada Writer", "email": "ada@example.invalid" },
+    });
+    let reply = mirror.server.request(
+        "PUT",
+        "/v1/files/images/dot.png",
+        &[
+            ("authorization", &format!("Bearer {TOKEN}")),
+            ("content-type", "application/json"),
+        ],
+        body.to_string().as_bytes(),
+    );
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    assert_eq!(mirror.tick(), Outcome::Pulled);
+    assert_eq!(mirror.head(), mirror.server_head());
+    assert_eq!(fs::read(mirror.path().join("images/dot.png")).unwrap(), png);
+    assert_eq!(mirror.ok(&["status", "--porcelain"]), "");
 }
 
 #[test]

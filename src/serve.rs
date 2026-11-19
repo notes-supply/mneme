@@ -65,9 +65,21 @@ pub struct Args {
     /// has no login, and the network must keep it private.
     #[arg(long, requires = "repo")]
     pub private_api: bool,
+    /// The largest image, in bytes, that `PUT /v1/files/{path}` takes. The server holds one in
+    /// memory twice as it commits it, as Base64 and as bytes, so it is at most 10 MiB.
+    #[arg(
+        long,
+        value_name = "BYTES",
+        default_value_t = edit::DEFAULT_MAX_UPLOAD,
+        value_parser = clap::value_parser!(u64).range(1..=rules::MAX_WHOLE),
+    )]
+    pub max_upload: u64,
     /// A clone of the wiki on this machine, whose `main` is read and followed. Only the reading
     /// API is served, on loopback, and nothing is written to the folder.
-    #[arg(long, conflicts_with_all = ["repo", "tokens", "tokens_env", "private_api"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["repo", "tokens", "tokens_env", "private_api", "max_upload"]
+    )]
     pub folder: Option<PathBuf>,
     /// The address to listen on. The default is 127.0.0.1:8080 with --repo, and 127.0.0.1:8081
     /// with --folder, which listens on a loopback address only.
@@ -231,7 +243,11 @@ async fn serve_repo(path: PathBuf, args: &Args) -> Result<()> {
     let router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(reading)
-        .merge(edit::router(Arc::clone(&wiki), Arc::clone(&tokens)))
+        .merge(edit::router(
+            Arc::clone(&wiki),
+            Arc::clone(&tokens),
+            args.max_upload,
+        ))
         .merge(admin::router(Arc::clone(&wiki), Arc::clone(&tokens)))
         .merge(git_http::router(wiki, tokens))
         .layer(middleware::from_fn(request_log));

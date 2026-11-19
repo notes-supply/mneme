@@ -64,6 +64,60 @@ pub fn of(path: &str) -> Media {
     }
 }
 
+/// The kinds of image the editing API takes, as [`of`] names them. SVG is not among them: it is
+/// markup that can hold script, and a file sent in place should be one that cannot run.
+pub const UPLOADS: [&str; 5] = [
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+];
+
+/// Which of [`UPLOADS`] `bytes` are, by the bytes each kind starts with, if any.
+#[must_use]
+pub fn image(bytes: &[u8]) -> Option<&'static str> {
+    let brand = |at: usize| bytes.get(at..at + 4);
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && brand(8) == Some(b"WEBP") {
+        Some("image/webp")
+    } else if brand(4) == Some(b"ftyp") && is_avif(bytes) {
+        Some("image/avif")
+    } else {
+        None
+    }
+}
+
+/// Whether the `ftyp` box that `bytes` start with names AVIF, a still image or a sequence, as
+/// its major brand or one of its compatible ones.
+fn is_avif(bytes: &[u8]) -> bool {
+    let number = |at: usize, width: usize| {
+        bytes
+            .get(at..at + width)
+            .map(|be| be.iter().fold(0_u64, |n, &byte| n << 8 | u64::from(byte)))
+    };
+    // A box's size is 32 bits, or, when that is 1, 64 bits after its type; 0 runs to the end.
+    let (brands_at, size) = match number(0, 4) {
+        Some(1) => (16, number(8, 8)),
+        Some(0) => (8, Some(u64::MAX)),
+        size => (8, size),
+    };
+    let Some(size) = size else { return false };
+    let end = usize::try_from(size).unwrap_or(usize::MAX).min(bytes.len());
+    // The major brand comes first, then a minor version, then the compatible brands.
+    let minor = brands_at + 4;
+    let mut brands = (brands_at..end.saturating_sub(3))
+        .step_by(4)
+        .filter(|&at| at != minor)
+        .filter_map(|at| bytes.get(at..at + 4));
+    end >= minor + 4 && brands.any(|brand| brand == b"avif" || brand == b"avis")
+}
+
 /// The `Content-Disposition` for the file at `path`: whether it shows in place, and its name.
 /// A name that is not plain ASCII is also given in UTF-8, as RFC 6266 has it, beside a plain one
 /// for a client that does not read that.
@@ -172,6 +226,42 @@ mod tests {
             assert_eq!(of(path).policy, SANDBOXED, "{path}");
         }
         assert_eq!(of("deck.pdf").policy, NOTHING);
+    }
+
+    #[test]
+    fn an_image_is_known_by_its_first_bytes_and_svg_is_none() {
+        let mut avif = b"\0\0\0\x1cftypmif1\0\0\0\0mif1avifmiaf".to_vec();
+        avif.extend_from_slice(b"rest of the file");
+        for (bytes, kind) in [
+            (&b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"[..], Some("image/png")),
+            (b"\xff\xd8\xff\xe0\0\x10JFIF", Some("image/jpeg")),
+            (b"GIF89a\x01\0\x01\0", Some("image/gif")),
+            (b"GIF87a", Some("image/gif")),
+            (b"RIFF\x24\0\0\0WEBPVP8 ", Some("image/webp")),
+            (b"\0\0\0\x14ftypavif\0\0\0\0", Some("image/avif")),
+            (b"\0\0\0\x14ftypavis\0\0\0\0", Some("image/avif")),
+            (
+                b"\0\0\0\x01ftyp\0\0\0\0\0\0\0\x1cmif1\0\0\0\0avif",
+                Some("image/avif"),
+            ),
+            (b"\0\0\0\0ftypmif1\0\0\0\0miafavif", Some("image/avif")),
+            (b"\0\0\0\x01ftyp\0\0\0\0\0\0\0\x18avif\0\0", None),
+            (&avif, Some("image/avif")),
+            (b"\0\0\0\x18ftypmif1\0\0\0\0heic", None),
+            (b"\0\0\0\x18ftypisom\0\0\0\0mp41avc1", None),
+            (b"\0\0\0\x10ftypheic\0\0\0\0avif", None),
+            (b"RIFF\x24\0\0\0WAVEfmt ", None),
+            (b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>", None),
+            (b"<?xml version=\"1.0\"?><svg/>", None),
+            (b"\x89PNG", None),
+            (b"", None),
+        ] {
+            assert_eq!(image(bytes), kind, "{}", String::from_utf8_lossy(bytes));
+        }
+        for kind in UPLOADS {
+            let path = format!("a.{}", kind.trim_start_matches("image/"));
+            assert_eq!(of(&path).content_type, kind, "named by its extension");
+        }
     }
 
     #[test]

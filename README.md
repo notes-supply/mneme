@@ -20,7 +20,7 @@ Mneme is a Markdown wiki in Git, made for AI agents and the people who work with
 - **Any Git remote.** A Git host over HTTPS, a bare repository by path, or a Mneme server.
 - **A server that keeps the rules.** It checks every push, gives each machine a token, and shows each machine's state.
 - **A reading API.** Pages, history, diffs and search as JSON, which [Atrium](https://github.com/notes-supply/atrium) shows to the whole team.
-- **An editing API.** A client that is not a folder of files, such as a web editor or an agent, commits a change to one page, refused when the page changed since it read it.
+- **An editing API.** A client that is not a folder of files, such as a web editor or an agent, commits a change to one page or adds an image beside it, refused when the page or image changed since it read it.
 - **Signed releases.** Static Linux binaries and a non-root image, signed keyless by the workflows that built them.
 
 ## Getting started

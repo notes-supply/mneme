@@ -198,7 +198,7 @@ Example: [`machines.json`](../tests/fixtures/api/machines.json).
 
 ## Editing
 
-`mneme serve --repo` also takes changes to pages, for clients that are not a folder of files, such as a web editor or an agent. Each route commits one change to `main`. It asks for `Authorization: Bearer <token>` with a token that may write, with or without `--private-api`: without a token the server knows it is `401` with no body, and with a read-only one `403` with `{ "error" }`. A body is JSON with `Content-Type: application/json` and at most 8 MiB, and has only the fields listed. One that is not JSON is `400`, one without that type `415`, one too long `413`, and one with a field missing, unknown or of the wrong type `422`, each with `{ "error" }`.
+`mneme serve --repo` also takes changes to pages, and images beside them, for clients that are not a folder of files, such as a web editor or an agent. Each route commits one change to `main`. It asks for `Authorization: Bearer <token>` with a token that may write, with or without `--private-api`: without a token the server knows it is `401` with no body, and with a read-only one `403` with `{ "error" }`. A body is JSON with `Content-Type: application/json` and at most 8 MiB, more for an [image](#put-v1filespath), and has only the fields listed. One that is not JSON is `400`, one without that type `415`, one too long `413`, and one with a field missing, unknown or of the wrong type `422`, each with `{ "error" }`.
 
 A change names its `base`: the `commit` of the newest event of the page it started from, as `GET /v1/pages/{id}` gives it, or the first event of `/v1/pages/{id}/versions`. When the live page at the change's path has had another event since, because someone changed, moved or deleted it, the change is `409` with `{ "error", "current" }` and nothing changes. `current` is the commit of that page's newest event now, or `null` when no live page is at the path. Only the page's own history counts: other pages may have moved on, and the change is made on top of `main` as it is then.
 
@@ -225,6 +225,16 @@ Example: [`deletion.json`](../tests/fixtures/api/deletion.json).
 Moves the page at `from` to `to`, with `{ "from", "to", "base", "author", "message" }`. The page keeps its text and its id. `base` is about the page at `from`, and a live page at `to` is a conflict too, whose `current` is still that of the page at `from`. The answer is `{ "commit", "page": Page }`. The default message is `Move <from> to <to>`.
 
 Example: [`move.json`](../tests/fixtures/api/move.json). A conflict: [`conflict.json`](../tests/fixtures/api/conflict.json).
+
+### `PUT /v1/files/{path}`
+
+Writes the image at `path` with `{ "base64", "base", "author", "message" }`, where `base64` is the image's bytes in standard Base64, with padding. `base` is as for a page, about the live file at the path: `null` creates, so that a file already there is a conflict, and to replace one it is the `commit` of the file's newest event, as [`GET /v1/files/{path}`](#get-v1filespath) gives it. The answer is `201` for a new file and `200` otherwise, with `{ "commit" }`, which is the base for the next change. Bytes that are already the file's make no commit, and `commit` is then the file's newest event. The default message is `Create <path>` or `Edit <path>`.
+
+The path keeps the rules of a page's but for its end: relative, with no empty, `.` or `..` part, no NUL, no part named `.git` in any case, no name Git will not store, and nothing in its way. It is not a page's, so it does not end in `.md`. Its extension names one of the images the server takes, PNG (`.png`), JPEG (`.jpg`, `.jpeg`), GIF (`.gif`), WebP (`.webp`) or AVIF (`.avif`), and the bytes must start as that kind does. SVG is not taken, since it can hold script. [`/v1/raw`](#get-v1rawpath) sends the file with the type its extension names. A path or bytes that break one of these, or `base64` that does not decode, is `422`.
+
+An image is at most 5 MiB, or what `mneme serve --max-upload BYTES` sets, up to 10 MiB. A larger one is `413` with `{ "error" }`. The body may be 8 MiB more than the image takes in Base64.
+
+Example: [`upload.json`](../tests/fixtures/api/upload.json).
 
 ## Managing machines
 

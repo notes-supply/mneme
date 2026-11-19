@@ -551,3 +551,178 @@ fn a_push_that_lands_as_an_edit_is_made_is_kept() {
         assert_eq!(index["markdown"], "# Pushed\n\nAs the edit was made.\n");
     }
 }
+
+/// A PNG of one pixel.
+const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+/// A GIF of one pixel.
+const GIF: &str = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+
+fn upload(server: &Server, path: &str, base64: &str, base: Option<&str>) -> Reply {
+    let body = json!({ "base64": base64, "base": base, "author": author() });
+    send(
+        server,
+        "PUT",
+        &format!("/v1/files/{path}"),
+        Some(TOKEN),
+        &body,
+    )
+}
+
+#[test]
+fn an_image_is_created_and_replaced_from_its_base_and_every_clone_gets_its_bytes() {
+    let (server, work) = wiki(&Options::default());
+    let created = upload(&server, "notes/images/dot.png", PNG, None);
+    assert_eq!(created.status, 201, "{}", created.body);
+    let first = created.json()["commit"].as_str().unwrap().to_owned();
+    assert_eq!(head(&server), first, "a read that follows sees the commit");
+    assert_eq!(
+        server.get("/v1/raw/notes/images/dot.png").bytes,
+        STANDARD.decode(PNG).unwrap()
+    );
+    let file = server.json("/v1/files/notes/images/dot.png");
+    assert_eq!(file["file"]["commit"], first.as_str());
+    assert_eq!(file["file"]["type"], "image/png");
+    assert_eq!(
+        show(&server, &first, "%an <%ae>|%cn <%ce>|%s"),
+        "Ada Writer <ada@example.invalid>|laptop <api@laptop>|Create notes/images/dot.png"
+    );
+
+    let taken = upload(&server, "notes/images/dot.png", PNG, None);
+    assert_eq!(taken.status, 409, "{}", taken.body);
+    assert_eq!(taken.json()["current"], first.as_str());
+    assert!(
+        taken.json()["error"]
+            .as_str()
+            .unwrap()
+            .contains("a file is already at")
+    );
+
+    let same = upload(&server, "notes/images/dot.png", PNG, Some(&first));
+    assert_eq!(same.status, 200, "{}", same.body);
+    assert_eq!(same.json()["commit"], first.as_str(), "no commit is made");
+
+    let body = json!({
+        "base64": GIF, "base": first, "author": author(), "message": "A GIF instead",
+    });
+    let renamed = send(
+        &server,
+        "PUT",
+        "/v1/files/notes/images/dot.png",
+        Some(TOKEN),
+        &body,
+    );
+    assert_eq!(
+        renamed.status, 422,
+        "a GIF is not named .png: {}",
+        renamed.body
+    );
+    let replaced = send(
+        &server,
+        "PUT",
+        "/v1/files/notes/images/dot.gif",
+        Some(TOKEN),
+        &body,
+    );
+    assert_eq!(
+        replaced.status, 409,
+        "no file is at dot.gif: {}",
+        replaced.body
+    );
+    assert_eq!(replaced.json()["current"], Value::Null);
+    let png = STANDARD.decode(PNG).unwrap();
+    let mut bigger = png.clone();
+    bigger.extend_from_slice(b"trailing bytes");
+    let replaced = upload(
+        &server,
+        "notes/images/dot.png",
+        &STANDARD.encode(&bigger),
+        Some(&first),
+    );
+    assert_eq!(replaced.status, 200, "{}", replaced.body);
+    let second = replaced.json()["commit"].as_str().unwrap().to_owned();
+    assert_eq!(
+        show(&server, &second, "%s|%P"),
+        format!("Edit notes/images/dot.png|{first}")
+    );
+    let stale = upload(&server, "notes/images/dot.png", PNG, Some(&first));
+    assert_eq!(stale.status, 409, "{}", stale.body);
+    assert_eq!(stale.json()["current"], second.as_str());
+
+    work.ok(&["pull", "-q", "--ff-only"]);
+    assert_eq!(work.ok(&["rev-parse", "HEAD"]).trim(), second);
+    assert_eq!(
+        std::fs::read(work.file("notes/images/dot.png")).unwrap(),
+        bigger
+    );
+}
+
+#[test]
+fn an_image_whose_path_kind_or_size_breaks_a_rule_is_refused_and_changes_nothing() {
+    let options = Options {
+        max_upload: Some(1024),
+        ..Options::default()
+    };
+    let (server, _work) = wiki(&options);
+    let before = head(&server);
+    let svg = STANDARD.encode(r#"<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>"#);
+    let png = STANDARD.decode(PNG).unwrap();
+    let mut large = png.clone();
+    large.resize(1025, 0);
+    let large = STANDARD.encode(large);
+    let cases: [(&str, &str, u16, &str); 13] = [
+        ("images/../dot.png", PNG, 422, "an empty, . or .. part"),
+        ("images//dot.png", PNG, 422, "an empty, . or .. part"),
+        ("%2Fimages/dot.png", PNG, 422, "starts with /"),
+        ("x/.GIT/dot.png", PNG, 422, "a path named .git"),
+        ("index.md/dot.png", PNG, 422, "in the way of"),
+        ("notes/dot.md", PNG, 422, "a page's path"),
+        (
+            "logo.svg",
+            &svg,
+            422,
+            "not named as an image this server takes",
+        ),
+        (
+            "dot.txt",
+            PNG,
+            422,
+            "not named as an image this server takes",
+        ),
+        ("dot", PNG, 422, "not named as an image this server takes"),
+        (
+            "dot.jpg",
+            PNG,
+            422,
+            "the bytes are image/png, and dot.jpg names image/jpeg",
+        ),
+        ("logo.png", &svg, 422, "the bytes are not image/png"),
+        ("dot.png", "not base64!", 422, "not Base64"),
+        ("dot.png", &large, 413, "1025 bytes"),
+    ];
+    for (path, base64, status, said) in cases {
+        let reply = upload(&server, path, base64, None);
+        assert_eq!(reply.status, status, "{path}: {}", reply.body);
+        let error = reply.json()["error"].as_str().unwrap().to_owned();
+        assert!(error.contains(said), "{path}: {error}");
+    }
+    let too_long = upload(&server, "dot.png", &"A".repeat(9 << 20), None);
+    assert_eq!(too_long.status, 413, "a body over its limit");
+    assert_eq!(head(&server), before, "nothing was committed");
+    let fits = upload(&server, "dot.png", PNG, None);
+    assert_eq!(fits.status, 201, "{}", fits.body);
+}
+
+#[test]
+fn an_image_asks_for_a_token_that_may_write() {
+    let options = Options {
+        reader: true,
+        ..Options::default()
+    };
+    let (server, _work) = wiki(&options);
+    let body = json!({ "base64": PNG, "base": null, "author": author() });
+    let nobody = send(&server, "PUT", "/v1/files/dot.png", None, &body);
+    assert_eq!(nobody.status, 401);
+    let read_only = send(&server, "PUT", "/v1/files/dot.png", Some(READER.1), &body);
+    assert_eq!(read_only.status, 403, "{}", read_only.body);
+    assert_eq!(server.get("/v1/raw/dot.png").status, 404);
+}

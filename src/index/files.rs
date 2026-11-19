@@ -161,6 +161,22 @@ impl Index {
         Ok(file.ok_or(Missing::File)?)
     }
 
+    /// The commit of the newest event of the live file at `path`, if one is there.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a database error.
+    pub fn live_file(&self, path: &str) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!("{FILE_SELECT} WHERE f.path = ?1 AND f.deleted IS NULL"),
+                [path],
+                |row| row.get(7),
+            )
+            .optional()?)
+    }
+
     /// Events newest first, of one file or of all, at or after `since` and before `before`, and
     /// how many there are in all.
     ///

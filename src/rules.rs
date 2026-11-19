@@ -51,8 +51,8 @@ pub enum Broken {
     LargeFile,
 }
 
-/// Why a path that a client names cannot be a page's. Git gives the push check only paths it
-/// could store, but a client of the editing API can send any text.
+/// Why a path that a client names cannot be a page's or a file's. Git gives the push check only
+/// paths it could store, but a client of the editing API can send any text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum BadPath {
     #[error("it does not end in .md")]
@@ -65,14 +65,25 @@ pub enum BadPath {
     Nul,
 }
 
-/// Why `path` cannot be a page's, if it cannot: it ends in `.md`, is relative, and has no empty,
-/// `.` or `..` part and no NUL. [`check`] then holds it to the rules for what it holds.
+/// Why `path` cannot be a page's, if it cannot: it ends in `.md` and is a [`file_path`].
+/// [`check`] then holds it to the rules for what it holds.
 #[must_use]
 pub fn page_path(path: &str) -> Option<BadPath> {
     if path.contains('\0') {
         Some(BadPath::Nul)
     } else if !is_page(path.as_bytes()) {
         Some(BadPath::NotAPage)
+    } else {
+        file_path(path)
+    }
+}
+
+/// Why `path` cannot be where a file is, if it cannot: it is relative, and has no empty, `.` or
+/// `..` part and no NUL.
+#[must_use]
+pub fn file_path(path: &str) -> Option<BadPath> {
+    if path.contains('\0') {
+        Some(BadPath::Nul)
     } else if path.starts_with('/') {
         Some(BadPath::Absolute)
     } else if path.split('/').any(|part| matches!(part, "" | "." | "..")) {
