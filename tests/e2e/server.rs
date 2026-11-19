@@ -46,6 +46,8 @@ pub struct Options {
     pub private_api: bool,
     /// A folder to put first on the server's `PATH`, such as one with a `git` of a test's own.
     pub path: Option<PathBuf>,
+    /// `--max-upload`: the largest image the editing API takes.
+    pub max_upload: Option<u64>,
 }
 
 /// Where a test server reads its tokens from.
@@ -205,6 +207,9 @@ impl Server {
         }
         if options.private_api {
             command.arg("--private-api");
+        }
+        if let Some(bytes) = options.max_upload {
+            command.args(["--max-upload", &bytes.to_string()]);
         }
         if let Some(first) = &options.path {
             let path = std::env::join_paths(

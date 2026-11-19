@@ -643,4 +643,10 @@ fn every_editing_route_answers_in_the_shape_of_its_example_file() {
         "deletion",
         &send("DELETE", "/v1/paths/notes/tides.md", &body, 200),
     );
+    let gif = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    let body = json!({ "base64": gif, "base": null, "author": author });
+    fits_example(
+        "upload",
+        &send("PUT", "/v1/files/notes/images/tide.gif", &body, 201),
+    );
 }

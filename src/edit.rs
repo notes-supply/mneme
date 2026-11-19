@@ -1,9 +1,9 @@
 //! The editing API of `mneme serve --repo`: routes that commit one change to `main`, for clients
 //! that are not a folder of files, such as a web editor or an agent. Every route asks for a
-//! token that may write.
+//! token that may write. Pages are written as text, and images beside them as bytes.
 //!
-//! A change names its base, the commit of the newest event of the page it started from, and is
-//! refused when the page has had another event since. Otherwise it is built on the current
+//! A change names its base, the commit of the newest event of the page or file it started from,
+//! and is refused when that has had another event since. Otherwise it is built on the current
 //! `main` with Git's plumbing in an index of its own, never a work tree, and `main` moves only if
 //! it is still the commit the change was built on. A push that lands meanwhile makes that fail,
 //! and the change is checked and built again on top of it.
@@ -22,6 +22,8 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{post, put};
 use axum::{Extension, Json, Router};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -30,10 +32,10 @@ use tokio::sync::Mutex;
 use crate::api::ApiError;
 use crate::auth::{self, Machine, Need, Tokens};
 use crate::index::{Page, PageId};
-use crate::repo::{EMPTY_TREE, MAIN, NO_OBJECT};
+use crate::repo::{EMPTY_TREE, MAIN, NO_OBJECT, is_page};
 use crate::rules::{self, Entry};
 use crate::serve::Wiki;
-use crate::{log, now};
+use crate::{log, media, now};
 
 /// How many times a change is checked and built again when `main` moved under it, before it is
 /// answered with 503.
@@ -42,23 +44,35 @@ const ATTEMPTS: usize = 4;
 const MAX_BODY: usize = 8 << 20;
 /// The longest commit message.
 const MAX_MESSAGE: usize = 64 << 10;
+/// The largest image `PUT /v1/files/{path}` takes unless `mneme serve --max-upload` says
+/// otherwise.
+pub const DEFAULT_MAX_UPLOAD: u64 = 5 << 20;
 
-/// The routes, and the lock that lets one change through at a time.
+/// The routes, the lock that lets one change through at a time, and the largest image.
 struct Editor {
     wiki: Arc<Wiki>,
     one_at_a_time: Mutex<()>,
+    max_upload: u64,
 }
 
 /// The editing routes. They ask for a token that may write whether or not the reading API does.
-pub fn router(wiki: Arc<Wiki>, tokens: Arc<Tokens>) -> Router {
+/// An image may be `max_upload` bytes.
+pub fn router(wiki: Arc<Wiki>, tokens: Arc<Tokens>, max_upload: u64) -> Router {
+    // Room for the image in Base64 and for anything else a body may hold.
+    let encoded = usize::try_from(max_upload.div_ceil(3) * 4).unwrap_or(usize::MAX);
     let editor = Arc::new(Editor {
         wiki,
         one_at_a_time: Mutex::new(()),
+        max_upload,
     });
     Router::new()
         .route("/v1/paths/{*path}", put(write).delete(remove))
         .route("/v1/moves", post(rename))
         .layer(DefaultBodyLimit::max(MAX_BODY))
+        .route(
+            "/v1/files/{*path}",
+            put(upload).layer(DefaultBodyLimit::max(MAX_BODY.saturating_add(encoded))),
+        )
         .layer(middleware::from_fn_with_state(
             (tokens, Need::Write),
             auth::guard,
@@ -81,7 +95,10 @@ impl IntoResponse for Unreadable {
 enum Refusal {
     /// The change would break a rule of the wiki, or the request has a bad value: 422.
     Rule(String),
-    /// The page is not as the client saw it: 409, with the commit of its newest event now.
+    /// The image is larger than the server takes: 413.
+    TooLarge(String),
+    /// The page or file is not as the client saw it: 409, with the commit of its newest event
+    /// now.
     Conflict {
         error: String,
         current: Option<String>,
@@ -112,6 +129,7 @@ impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
         let (status, body) = match self {
             Self::Rule(error) => (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": error })),
+            Self::TooLarge(error) => (StatusCode::PAYLOAD_TOO_LARGE, json!({ "error": error })),
             Self::Conflict { error, current } => (
                 StatusCode::CONFLICT,
                 json!({ "error": error, "current": current }),
@@ -202,6 +220,19 @@ struct Writing {
     message: Option<String>,
 }
 
+/// `PUT /v1/files/{path}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Upload {
+    base64: String,
+    /// Present, and `null` for a new file.
+    #[serde(deserialize_with = "Option::deserialize")]
+    base: Option<String>,
+    author: Author,
+    #[serde(default)]
+    message: Option<String>,
+}
+
 /// `DELETE /v1/paths/{path}`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -232,20 +263,22 @@ struct Changed {
     page: Page,
 }
 
+/// What a deletion or an image answers: the commit to name as the next base.
 #[derive(Serialize)]
-struct Deleted {
+struct Committed {
     commit: String,
 }
 
-/// One change to the tree of `main`.
+/// One change to the tree of `main`. What it is about is a page when its path is a page's, and a
+/// file otherwise.
 enum Change {
-    Write { path: String, markdown: String },
+    Write { path: String, bytes: Vec<u8> },
     Delete { path: String },
     Move { from: String, to: String },
 }
 
 impl Change {
-    /// The path whose page the base is about.
+    /// The path whose page or file the base is about.
     fn path(&self) -> &str {
         match self {
             Self::Write { path, .. } | Self::Delete { path } | Self::Move { from: path, .. } => {
@@ -274,12 +307,12 @@ struct Asked {
 
 /// What came of a change.
 struct Made {
-    /// The new commit, or, when the change left the tree as it was, the commit of the page's
-    /// newest event, which stays its base.
+    /// The new commit, or, when the change left the tree as it was, the commit of the newest
+    /// event of the page or file, which stays its base.
     commit: String,
-    /// The page after the change, `None` for a deletion.
+    /// The page after the change, `None` for a deletion or a file.
     page: Option<Page>,
-    /// Whether a new page was made.
+    /// Whether a new page or file was made.
     created: bool,
 }
 
@@ -300,18 +333,14 @@ async fn write(
     let asked = Asked {
         change: Change::Write {
             path,
-            markdown: body.markdown,
+            bytes: body.markdown.into_bytes(),
         },
         base: body.base,
         author: body.author,
         message,
     };
     let made = editor.make(&machine, asked).await?;
-    let status = if made.created {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    };
+    let status = made.status();
     let page = made.page.context("the page is not in the index")?;
     let changed = Changed {
         commit: made.commit,
@@ -320,12 +349,53 @@ async fn write(
     Ok((status, Json(changed)).into_response())
 }
 
+async fn upload(
+    State(editor): State<Arc<Editor>>,
+    Extension(Machine(machine)): Extension<Machine>,
+    Param(path): Param,
+    Body(body): Body<Upload>,
+) -> Result<Response, Refusal> {
+    check_file_path(&path)?;
+    let bytes = STANDARD
+        .decode(body.base64)
+        .map_err(|error| Refusal::Rule(format!("base64 is not Base64: {error}")))?;
+    let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if size > editor.max_upload {
+        return Err(Refusal::TooLarge(format!(
+            "the image is {size} bytes, and this server takes at most {}",
+            editor.max_upload
+        )));
+    }
+    check_image(&path, &bytes)?;
+    if let Some(broken) = rules::check(path.as_bytes(), Entry::File(size)) {
+        return Err(Refusal::Rule(format!("{broken} at {path}")));
+    }
+    let verb = if body.base.is_some() {
+        "Edit"
+    } else {
+        "Create"
+    };
+    let message = message(body.message, || format!("{verb} {path}"))?;
+    let asked = Asked {
+        change: Change::Write { path, bytes },
+        base: body.base,
+        author: body.author,
+        message,
+    };
+    let made = editor.make(&machine, asked).await?;
+    let status = made.status();
+    let committed = Committed {
+        commit: made.commit,
+    };
+    Ok((status, Json(committed)).into_response())
+}
+
 async fn remove(
     State(editor): State<Arc<Editor>>,
     Extension(Machine(machine)): Extension<Machine>,
     Param(path): Param,
     Body(body): Body<Removal>,
-) -> Result<Json<Deleted>, Refusal> {
+) -> Result<Json<Committed>, Refusal> {
     check_page(&path, 0)?;
     let message = message(body.message, || format!("Delete {path}"))?;
     let asked = Asked {
@@ -335,7 +405,7 @@ async fn remove(
         message,
     };
     let made = editor.make(&machine, asked).await?;
-    Ok(Json(Deleted {
+    Ok(Json(Committed {
         commit: made.commit,
     }))
 }
@@ -383,6 +453,40 @@ fn check_page(path: &str, size: u64) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Refuses a path that cannot be an image's: one that breaks a rule of every path, or a page's.
+fn check_file_path(path: &str) -> Result<(), Refusal> {
+    if let Some(bad) = rules::file_path(path) {
+        return Err(Refusal::Rule(format!(
+            "{path:?} is not a file's path: {bad}"
+        )));
+    }
+    if is_page(path.as_bytes()) {
+        return Err(Refusal::Rule(format!(
+            "{path} is a page's path, and a page is written with PUT /v1/paths/{path}"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses `bytes` unless they are one of the images the API takes and the kind that `path`'s
+/// extension names, which is the type they are sent with.
+fn check_image(path: &str, bytes: &[u8]) -> Result<(), Refusal> {
+    let named = media::of(path).content_type;
+    if !media::UPLOADS.contains(&named) {
+        return Err(Refusal::Rule(format!(
+            "{path} is not named as an image this server takes: PNG, JPEG, GIF, WebP or AVIF, \
+             with its extension"
+        )));
+    }
+    match media::image(bytes) {
+        Some(kind) if kind == named => Ok(()),
+        Some(kind) => Err(Refusal::Rule(format!(
+            "the bytes are {kind}, and {path} names {named}"
+        ))),
+        None => Err(Refusal::Rule(format!("the bytes are not {named}"))),
+    }
+}
+
 /// The commit message: the one asked for, or `default` when it is missing or blank. It ends in a
 /// newline, as `git commit` leaves one.
 fn message(asked: Option<String>, default: impl FnOnce() -> String) -> Result<String, Refusal> {
@@ -401,11 +505,25 @@ fn message(asked: Option<String>, default: impl FnOnce() -> String) -> Result<St
     Ok(message)
 }
 
-/// What the index says of the page a change is about, at the head the change is built on.
+/// What the index says of the page or file a change is about, at the head the change is built
+/// on.
 struct Seen {
     head: Option<String>,
-    /// The live page at the change's path, and the commit of its newest event.
-    at: Option<(PageId, String)>,
+    /// The commit of the newest event of the live page or file at the change's path.
+    current: Option<String>,
+    /// The live page at the change's path, when it is about a page.
+    page: Option<PageId>,
+}
+
+impl Made {
+    /// `201` for a new page or file, and `200` otherwise.
+    fn status(&self) -> StatusCode {
+        if self.created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        }
+    }
 }
 
 impl Editor {
@@ -444,9 +562,9 @@ impl Editor {
                 continue;
             }
             let Some(commit) = commit else {
-                let newest = seen.at_commit().or(seen.head);
-                let page = match seen.at {
-                    Some((id, _)) => Some(self.page(id).await?),
+                let newest = seen.current.or(seen.head);
+                let page = match seen.page {
+                    Some(id) => Some(self.page(id).await?),
                     None => None,
                 };
                 return Ok(Made {
@@ -466,8 +584,8 @@ impl Editor {
                 }),
             );
             let page = match asked.change.after() {
-                Some(path) => Some(self.left_at(&commit, path).await?),
-                None => None,
+                Some(path) if is_page(path.as_bytes()) => Some(self.left_at(&commit, path).await?),
+                _ => None,
             };
             return Ok(Made {
                 commit,
@@ -478,35 +596,44 @@ impl Editor {
         Err(Refusal::Busy)
     }
 
-    /// The index's head and the page at the change's path, once they are known to be as the
-    /// client saw them: the page's newest event is the base, or there is no page and no base, and
-    /// a move's `to` is free.
+    /// The index's head and the page or file at the change's path, once they are known to be
+    /// as the client saw them: its newest event is the base, or there is none and no base, and a
+    /// move's `to` is free.
     async fn look(&self, asked: &Arc<Asked>) -> Result<Seen, Refusal> {
         let looking = Arc::clone(asked);
+        let path = asked.change.path();
+        let page = is_page(path.as_bytes());
         let (seen, taken) = self
             .wiki
             .read(move |_, index| {
-                let at = index.live(looking.change.path())?;
+                let path = looking.change.path();
+                let (current, page) = if page {
+                    index.live(path)?.map(|(id, commit)| (commit, id)).unzip()
+                } else {
+                    (index.live_file(path)?, None)
+                };
                 let taken = match &looking.change {
                     Change::Move { to, .. } => index.live(to)?.is_some(),
                     Change::Write { .. } | Change::Delete { .. } => false,
                 };
+                let head = index.head();
                 Ok((
                     Seen {
-                        head: index.head(),
-                        at,
+                        head,
+                        current,
+                        page,
                     },
                     taken,
                 ))
             })
             .await?;
-        let current = seen.at_commit();
-        let path = asked.change.path();
+        let current = seen.current.clone();
+        let what = if page { "page" } else { "file" };
         let error = match (&current, &asked.base) {
-            (Some(_), None) => format!("a page is already at {path}"),
-            (None, Some(_)) => format!("no page is at {path} now"),
+            (Some(_), None) => format!("a {what} is already at {path}"),
+            (None, Some(_)) => format!("no {what} is at {path} now"),
             (Some(current), Some(base)) if current != base => {
-                format!("the page at {path} has changed since its base")
+                format!("the {what} at {path} has changed since its base")
             }
             _ => match &asked.change {
                 Change::Move { to, .. } if taken => format!("a page is already at {to}"),
@@ -529,12 +656,6 @@ impl Editor {
 
     async fn page(&self, id: PageId) -> Result<Page, Refusal> {
         Ok(self.wiki.read(move |_, index| index.page(&id)).await?)
-    }
-}
-
-impl Seen {
-    fn at_commit(&self) -> Option<String> {
-        self.at.as_ref().map(|(_, commit)| commit.clone())
     }
 }
 
@@ -630,12 +751,11 @@ impl<'a> Plumbing<'a> {
             None => self.line(&["read-tree", "--empty"], b"", &[])?,
         };
         match &asked.change {
-            Change::Write { path, markdown } => {
+            Change::Write { path, bytes } => {
                 let mode = self
                     .entry(path)?
                     .map_or("100644".to_owned(), |(mode, _)| mode);
-                let blob =
-                    self.line(&["hash-object", "-w", "--stdin"], markdown.as_bytes(), &[])?;
+                let blob = self.line(&["hash-object", "-w", "--stdin"], bytes, &[])?;
                 self.add(&mode, &blob, path)?;
             }
             Change::Delete { path } => self.remove(path)?,
